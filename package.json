@@ -11,6 +11,7 @@
     "build": "tsc",
     "check:no-unused": "tsc -p tsconfig.no-unused.json",
     "dev": "tsc --watch",
+    "lint": "biome lint .",
     "setup": "node bin/omx.js setup",
     "doctor": "node bin/omx.js doctor",
     "test": "npm run build && node --test $(find dist -name '*.test.js') && node scripts/generate-catalog-docs.js --check"
@@ -49,6 +50,7 @@
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.4",
     "@types/node": "^22.19.11",
     "typescript": "^5.7.0"
   },

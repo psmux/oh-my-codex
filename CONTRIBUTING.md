@@ -9,6 +9,7 @@ Thanks for contributing.
 
 ```bash
 npm install
+npm run lint
 npm run build
 npm test
 ```
@@ -60,7 +61,7 @@ unset OMX_TEAM_WORKER OMX_TEAM_STATE_ROOT OMX_TEAM_LEADER_CWD OMX_TEAM_WORKER_CL
 
 1. Create a branch from `main`.
 2. Make focused changes.
-3. Run build and tests locally.
+3. Run lint, build, and tests locally.
 4. Open a pull request using the provided template.
 
 ## Commit style
@@ -83,6 +84,7 @@ docs: clarify setup steps for Codex CLI users
 - [ ] Scope is focused and clearly described
 - [ ] `npm run build` passes
 - [ ] `npm test` passes
+- [ ] `npm run lint` passes
 - [ ] Documentation updated when behavior changed
 - [ ] No unrelated formatting/refactor churn
 

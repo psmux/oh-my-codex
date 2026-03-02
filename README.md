@@ -281,6 +281,7 @@ oh-my-codex/
 git clone https://github.com/Yeachan-Heo/oh-my-codex.git
 cd oh-my-codex
 npm install
+npm run lint
 npm run build
 npm test
 ```
