@@ -12,6 +12,8 @@ Options:
   --help, -h           Show this help message
   --prd <task text>    PRD mode shortcut: mark the task text explicitly
   --prd=<task text>    Same as --prd "<task text>"
+  -i <path>     Reference image path for visual iteration guidance (repeatable)
+  --images-dir <dir>  Directory containing reference images for visual tasks
 
 PRD mode:
   Ralph initializes persistence artifacts in .omx/ so PRD and progress
@@ -125,6 +127,48 @@ export function normalizeRalphCliArgs(args: readonly string[]): string[] {
   return normalized;
 }
 
+export interface RalphLaunchVisualConfig {
+  referenceImages: string[];
+  imagesDir?: string;
+}
+
+export function parseRalphLaunchVisualConfig(args: string[]): RalphLaunchVisualConfig {
+  const referenceImages: string[] = [];
+  let imagesDir: string | undefined;
+
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i] ?? '';
+    if (token === '-i') {
+      const next = args[i + 1];
+      if (next && !next.startsWith('-')) {
+        referenceImages.push(next);
+        i += 1;
+      }
+      continue;
+    }
+    if (token.startsWith('-i=')) {
+      const value = token.slice(3).trim();
+      if (value) referenceImages.push(value);
+      continue;
+    }
+    if (token === '--images-dir') {
+      const next = args[i + 1];
+      if (next && !next.startsWith('-')) {
+        imagesDir = next;
+        i += 1;
+      }
+      continue;
+    }
+    if (token.startsWith('--images-dir=')) {
+      const value = token.slice('--images-dir='.length).trim();
+      if (value) imagesDir = value;
+      continue;
+    }
+  }
+
+  return { referenceImages, imagesDir };
+}
+
 export async function ralphCommand(args: string[]): Promise<void> {
   const normalizedArgs = normalizeRalphCliArgs(args);
   const cwd = process.cwd();
@@ -136,6 +180,7 @@ export async function ralphCommand(args: string[]): Promise<void> {
 
   // Initialize ralph persistence artifacts (state dirs, legacy PRD/progress migration)
   const artifacts = await ensureCanonicalRalphArtifacts(cwd);
+  const visualConfig = parseRalphLaunchVisualConfig(args);
 
   // Write initial ralph mode state
   const task = extractRalphTaskDescription(normalizedArgs);
@@ -143,6 +188,11 @@ export async function ralphCommand(args: string[]): Promise<void> {
   await updateModeState('ralph', {
     current_phase: 'starting',
     canonical_progress_path: artifacts.canonicalProgressPath,
+    visual_iteration: {
+      reference_images: visualConfig.referenceImages,
+      ...(visualConfig.imagesDir ? { images_dir: visualConfig.imagesDir } : {}),
+      pass_threshold: 90,
+    },
     ...(artifacts.canonicalPrdPath ? { canonical_prd_path: artifacts.canonicalPrdPath } : {}),
   });
 

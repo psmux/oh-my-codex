@@ -409,6 +409,7 @@ async function main() {
     try {
       const { maybePersistVisualVerdict } = await import('./notify-hook/visual-verdict.js');
       await maybePersistVisualVerdict({
+        cwd,
         payload,
         stateDir,
         logsDir,
