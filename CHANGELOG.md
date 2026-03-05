@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-03-05
+
+Generated from `4141fd6..HEAD` (non-merge commits) and release validation on `dev`.
+
+### Added
+- Team CLI interop API (`omx team api ...`) with hard deprecation of legacy `team_*` MCP tools.
+- Finalized CLI-first team interop/dispatch reliability flow.
+
+### Changed
+- Bumped package version to `0.8.1`.
+- Refactored notification setup into a unified `configure-notifications` flow.
+- Updated docs to prefer the CLI-first team protocol + interop contract.
+
+### Fixed
+- Enforced CLI-first dispatch policy and removed dead state-server helpers.
+- OpenClaw command timeout is now configurable with bounded safety limits.
+
+### CI / Test / Docs
+- Added comprehensive team API interop tests for coverage gating.
+- Added configure-notifications setup guidance to README.
+- Expanded OpenClaw docs with token/command safety guidance and a dev runbook.
+
 ## [0.8.0] - 2026-03-04
 
 Generated from `v0.7.6..dev` (non-merge commits) and release validation on `dev`.
