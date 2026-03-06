@@ -20,8 +20,10 @@ import {
   listEnterpriseAssignments,
   listEnterpriseEscalations,
   listEnterpriseWorkerIdentities,
+  listEnterpriseWorkerStates,
   markEnterpriseMailboxDelivered,
   readEnterpriseWorkerIdentity,
+  readEnterpriseWorkerState,
   sendEnterpriseMailboxMessage,
 } from '../enterprise/state.js';
 import {
@@ -253,7 +255,8 @@ async function renderInspect(kind: string, id: string | undefined): Promise<void
       const live = await readEnterpriseLiveRuntime(cwd);
       const liveWorker = live?.workers.find((worker) => worker.nodeId === id) ?? null;
       const workerIdentity = await readEnterpriseWorkerIdentity(cwd, id);
-      console.log(JSON.stringify({ ...record, liveWorker, workerIdentity, mailbox: await readEnterpriseMailbox(cwd, id) }, null, 2));
+      const workerState = await readEnterpriseWorkerState(cwd, id);
+      console.log(JSON.stringify({ ...record, liveWorker, workerIdentity, workerState, mailbox: await readEnterpriseMailbox(cwd, id) }, null, 2));
       return;
     }
     case 'division': {
@@ -264,7 +267,8 @@ async function renderInspect(kind: string, id: string | undefined): Promise<void
       const leadWorker = live?.workers.find((worker) => worker.nodeId === id) ?? null;
       const subordinateWorkers = live?.workers.filter((worker) => worker.ownerLeadId === id) ?? [];
       const workerIdentity = await readEnterpriseWorkerIdentity(cwd, id);
-      console.log(JSON.stringify({ ...summary, liveLeadWorker: leadWorker, workerIdentity, liveSubordinateWorkers: subordinateWorkers }, null, 2));
+      const workerState = await readEnterpriseWorkerState(cwd, id);
+      console.log(JSON.stringify({ ...summary, liveLeadWorker: leadWorker, workerIdentity, workerState, liveSubordinateWorkers: subordinateWorkers }, null, 2));
       return;
     }
     case 'chairman': {
@@ -286,7 +290,10 @@ async function renderInspect(kind: string, id: string | undefined): Promise<void
       return;
     }
     case 'workers': {
-      console.log(JSON.stringify(await listEnterpriseWorkerIdentities(cwd), null, 2));
+      const identities = await listEnterpriseWorkerIdentities(cwd);
+      const states = await listEnterpriseWorkerStates(cwd);
+      const byNodeId = new Map(states.map((state) => [state.nodeId, state] as const));
+      console.log(JSON.stringify(identities.map((identity) => ({ ...identity, workerState: byNodeId.get(identity.nodeId) ?? null })), null, 2));
       return;
     }
     default:

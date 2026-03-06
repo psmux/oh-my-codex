@@ -52,6 +52,14 @@ export interface EnterpriseMailbox {
 }
 
 
+export interface EnterpriseWorkerStateRecord {
+  nodeId: string;
+  state: 'starting' | 'active' | 'draining' | 'stopped';
+  paneId: string | null;
+  ownerLeadId: string | null;
+  updatedAt: string;
+}
+
 export interface EnterpriseWorkerIdentityRecord {
   nodeId: string;
   role: 'division_lead' | 'subordinate';
@@ -131,6 +139,36 @@ export function mailboxPath(cwd: string, nodeId: string): string {
   return join(mailboxDir(cwd), `${nodeId}.json`);
 }
 
+
+function workerStateDir(cwd: string): string {
+  return join(enterpriseStateRoot(cwd), 'worker-state');
+}
+
+export function workerStatePath(cwd: string, nodeId: string): string {
+  return join(workerStateDir(cwd), `${nodeId}.json`);
+}
+
+export async function writeEnterpriseWorkerState(cwd: string, record: EnterpriseWorkerStateRecord): Promise<void> {
+  await mkdir(workerStateDir(cwd), { recursive: true });
+  await writeFile(workerStatePath(cwd, record.nodeId), JSON.stringify(record, null, 2));
+}
+
+export async function readEnterpriseWorkerState(cwd: string, nodeId: string): Promise<EnterpriseWorkerStateRecord | null> {
+  const path = workerStatePath(cwd, nodeId);
+  if (!existsSync(path)) return null;
+  return JSON.parse(await readFile(path, 'utf-8')) as EnterpriseWorkerStateRecord;
+}
+
+export async function listEnterpriseWorkerStates(cwd: string): Promise<EnterpriseWorkerStateRecord[]> {
+  const dir = workerStateDir(cwd);
+  if (!existsSync(dir)) return [];
+  const files = await readdir(dir);
+  const records = await Promise.all(files.filter((file) => file.endsWith('.json')).map(async (file) => {
+    const raw = await readFile(join(dir, file), 'utf-8');
+    return JSON.parse(raw) as EnterpriseWorkerStateRecord;
+  }));
+  return records.sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+}
 
 function workerIdentityDir(cwd: string): string {
   return join(enterpriseStateRoot(cwd), 'workers');

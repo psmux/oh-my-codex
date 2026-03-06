@@ -4,7 +4,7 @@ import { join, resolve } from 'path';
 import { enterpriseTmuxAdapter, type EnterpriseTmuxSession } from './tmux-adapter.js';
 import { writeEnterpriseWorkerInstructions } from './worker-bootstrap.js';
 import { applyEnterpriseExecutionUpdates, readEnterpriseRuntime, type EnterpriseRuntimeHandle } from './runtime.js';
-import { appendEnterpriseEvent, clearEnterpriseLiveState, sendEnterpriseMailboxMessage, writeEnterpriseWorkerIdentity } from './state.js';
+import { appendEnterpriseEvent, clearEnterpriseLiveState, sendEnterpriseMailboxMessage, writeEnterpriseWorkerIdentity, writeEnterpriseWorkerState } from './state.js';
 import { updateModeState } from '../modes/base.js';
 import type { EnterpriseMonitorSnapshot, EnterpriseNode } from './contracts.js';
 
@@ -92,7 +92,15 @@ async function buildLiveWorker(
     startupCommand,
     instructionPath,
   };
-  await writeEnterpriseWorkerIdentity(projectRoot, { ...record, updatedAt: new Date().toISOString() });
+  const now = new Date().toISOString();
+  await writeEnterpriseWorkerIdentity(projectRoot, { ...record, updatedAt: now });
+  await writeEnterpriseWorkerState(projectRoot, {
+    nodeId: node.id,
+    state: 'active',
+    paneId,
+    ownerLeadId,
+    updatedAt: now,
+  });
   return record;
 }
 
@@ -284,7 +292,21 @@ export async function shutdownEnterpriseLiveNode(nodeId: string, cwd: string = p
   });
 
   for (const worker of workersToShutdown) {
+    await writeEnterpriseWorkerState(projectRoot, {
+      nodeId: worker.nodeId,
+      state: 'draining',
+      paneId: worker.paneId,
+      ownerLeadId: worker.ownerLeadId,
+      updatedAt: new Date().toISOString(),
+    });
     await enterpriseTmuxAdapter.killPane(worker.paneId);
+    await writeEnterpriseWorkerState(projectRoot, {
+      nodeId: worker.nodeId,
+      state: 'stopped',
+      paneId: null,
+      ownerLeadId: worker.ownerLeadId,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   const removedIds = new Set(workersToShutdown.map((entry) => entry.nodeId));
@@ -298,6 +320,13 @@ export async function shutdownEnterpriseLiveNode(nodeId: string, cwd: string = p
   await persistLiveRuntimeSnapshot(projectRoot, updatedLive);
   for (const workerRecord of updatedLive.workers) {
     await writeEnterpriseWorkerIdentity(projectRoot, { ...workerRecord, updatedAt: updatedLive.updated_at });
+    await writeEnterpriseWorkerState(projectRoot, {
+      nodeId: workerRecord.nodeId,
+      state: 'active',
+      paneId: workerRecord.paneId,
+      ownerLeadId: workerRecord.ownerLeadId,
+      updatedAt: updatedLive.updated_at,
+    });
   }
   await updateModeState('enterprise', {
     live_worker_count: updatedLive.workers.length,
@@ -345,7 +374,25 @@ export async function shutdownEnterpriseLiveRuntime(cwd: string = process.cwd())
     payload: { liveSession: live?.tmuxSessionName ?? null },
   });
   if (live?.tmuxSessionName) {
+    for (const worker of live.workers) {
+      await writeEnterpriseWorkerState(projectRoot, {
+        nodeId: worker.nodeId,
+        state: 'draining',
+        paneId: worker.paneId,
+        ownerLeadId: worker.ownerLeadId,
+        updatedAt: now,
+      });
+    }
     await enterpriseTmuxAdapter.destroyTmuxSession(live.tmuxSessionName);
+    for (const worker of live.workers) {
+      await writeEnterpriseWorkerState(projectRoot, {
+        nodeId: worker.nodeId,
+        state: 'stopped',
+        paneId: null,
+        ownerLeadId: worker.ownerLeadId,
+        updatedAt: now,
+      });
+    }
   }
   await clearEnterpriseLiveState(projectRoot);
   await updateModeState('enterprise', {
