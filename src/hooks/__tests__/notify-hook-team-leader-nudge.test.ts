@@ -288,7 +288,7 @@ describe('notify-hook team leader nudge', () => {
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
       assert.match(tmuxLog, /\[OMX\] All 2 workers idle/);
-      assert.match(tmuxLog, /Next: reuse this team with a follow-up task/);
+      assert.match(tmuxLog, /Next: assign the next follow-up task to this idle team/);
       assert.doesNotMatch(tmuxLog, /launch a new team/);
       assert.doesNotMatch(tmuxLog, /omx team shutdown/);
     });
@@ -355,7 +355,7 @@ describe('notify-hook team leader nudge', () => {
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
       assert.match(tmuxLog, /\[OMX\] All 2 workers idle/);
       assert.match(tmuxLog, /Next: launch a new team for the next task set/);
-      assert.doesNotMatch(tmuxLog, /reuse this team with a follow-up task/);
+      assert.doesNotMatch(tmuxLog, /assign the next follow-up task to this idle team/);
     });
   });
 
@@ -524,8 +524,9 @@ describe('notify-hook team leader nudge', () => {
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
       assert.match(tmuxLog, /worker-1 said "on it"/);
-      assert.match(tmuxLog, /no work-start evidence yet/);
+      assert.match(tmuxLog, /no start evidence/);
       assert.match(tmuxLog, /status: unknown/);
+      assert.match(tmuxLog, /Next: check worker-1 msg\/output, confirm task in omx team status ack-missing-start/);
 
       const eventsPath = join(teamDir, 'events', 'events.ndjson');
       const events = (await readFile(eventsPath, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
@@ -605,8 +606,9 @@ describe('notify-hook team leader nudge', () => {
       assert.equal(result.status, 0, `notify-hook failed: ${result.stderr || result.stdout}`);
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-      assert.doesNotMatch(tmuxLog, /no work-start evidence yet/);
+      assert.doesNotMatch(tmuxLog, /no start evidence/);
       assert.match(tmuxLog, /Team ack-with-start: 1 msg\(s\) for leader/);
+      assert.match(tmuxLog, /Next: omx team status ack-with-start; read mailbox messages; reply next step/);
 
       const eventsPath = join(teamDir, 'events', 'events.ndjson');
       const events = (await readFile(eventsPath, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
@@ -793,7 +795,7 @@ exit 0
       assert.match(tmuxLog, /Team beta:/);
       assert.match(tmuxLog, /leader stale/);
       assert.match(tmuxLog, /pane\(s\) still active/);
-      assert.match(tmuxLog, /Next: omx team status beta/);
+      assert.match(tmuxLog, /Next: omx team status beta; check messages, assign next step; keep polling/);
       assert.match(tmuxLog, /keep polling/);
       assert.match(tmuxLog, /\[OMX_TMUX_INJECT\]/, 'should include injection marker');
     });
@@ -912,11 +914,11 @@ exit 0
       assert.equal(result.status, 0, `notify-hook failed: ${result.stderr || result.stdout}`);
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-      assert.match(tmuxLog, /Team stalled-progress: leader stale, no team progress for 3m/);
-      assert.match(tmuxLog, /Next: omx team status stalled-progress/);
+      assert.match(tmuxLog, /Team stalled-progress: leader stale, no progress 3m/);
+      assert.match(tmuxLog, /Next: omx team status stalled-progress; check messages, assign next step; keep polling/);
       assert.match(tmuxLog, /keep polling/);
-      assert.match(tmuxLog, /pending:1 in_progress:1 blocked:0/);
-      assert.match(tmuxLog, /1 worker signal missing/);
+      assert.match(tmuxLog, /p:1 ip:1 b:0/);
+      assert.match(tmuxLog, /1 signal missing/);
 
       const eventsPath = join(teamDir, 'events', 'events.ndjson');
       const events = (await readFile(eventsPath, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
@@ -1039,11 +1041,11 @@ exit 0
       assert.equal(result.status, 0, `notify-hook failed: ${result.stderr || result.stdout}`);
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-      assert.match(tmuxLog, /Team stalled-before-stale: worker panes stalled, no team progress for 3m/);
-      assert.match(tmuxLog, /Next: omx team status stalled-before-stale/);
+      assert.match(tmuxLog, /Team stalled-before-stale: worker panes stalled, no progress 3m/);
+      assert.match(tmuxLog, /Next: omx team status stalled-before-stale; check messages, assign next step; keep polling/);
       assert.match(tmuxLog, /keep polling/);
       assert.doesNotMatch(tmuxLog, /leader stale/);
-      assert.match(tmuxLog, /pending:1 in_progress:1 blocked:0/);
+      assert.match(tmuxLog, /p:1 ip:1 b:0/);
 
       const eventsPath = join(teamDir, 'events', 'events.ndjson');
       const events = (await readFile(eventsPath, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
@@ -1166,7 +1168,7 @@ exit 0
       assert.equal(second.status, 0, `notify-hook failed: ${second.stderr || second.stdout}`);
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-      const sends = tmuxLog.match(/send-keys -t %88 -l Team stalled-before-stale-bounded: worker panes stalled, no team progress/g) || [];
+      const sends = tmuxLog.match(/send-keys -t %88 -l Team stalled-before-stale-bounded: worker panes stalled, no progress/g) || [];
       assert.equal(sends.length, 1, 'cooldown should keep repeated stalled-team nudges bounded');
     });
   });
@@ -1610,7 +1612,7 @@ exit 0
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
       assert.match(tmuxLog, /leader stale/);
       assert.match(tmuxLog, /msg\(s\) pending/);
-      assert.match(tmuxLog, /Next: omx team status delta/);
+      assert.match(tmuxLog, /Next: omx team status delta; read mailbox messages; reply next step; keep polling/);
       assert.match(tmuxLog, /keep polling/);
       assert.match(tmuxLog, /\[OMX_TMUX_INJECT\]/, 'should include injection marker');
 

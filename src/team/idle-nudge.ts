@@ -30,7 +30,7 @@ export interface NudgeConfig {
 export const DEFAULT_NUDGE_CONFIG: NudgeConfig = {
   delayMs: 30_000,
   maxCount: 3,
-  message: 'Continue working on your assigned task.',
+  message: 'Next: read your inbox/mailbox, continue your assigned task now, and if blocked send the leader a concrete status update.',
 };
 
 // ---------------------------------------------------------------------------

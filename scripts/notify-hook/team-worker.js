@@ -386,7 +386,8 @@ export async function maybeNotifyLeaderAllWorkersIdle({ cwd, stateDir, logsDir, 
   }
 
   const N = workers.length;
-  const message = `[OMX] All ${N} worker${N === 1 ? '' : 's'} idle. Ready for next instructions. ${DEFAULT_MARKER}`;
+  const nextAction = `Next: run omx team status ${teamName}, check unread worker messages, then assign the next concrete task or shut the team down.`;
+  const message = `[OMX] All ${N} worker${N === 1 ? '' : 's'} idle. ${nextAction} ${DEFAULT_MARKER}`;
   const tmuxTarget = leaderPaneId;
   const paneGuard = await checkPaneReadyForTeamSendKeys(tmuxTarget);
   if (!paneGuard.ok) {
@@ -591,6 +592,7 @@ export async function maybeNotifyLeaderWorkerIdle({ cwd, stateDir, logsDir, pars
   if (prevState && prevState !== 'unknown') parts.push(`(was: ${prevState})`);
   if (currentTaskId) parts.push(`task: ${currentTaskId}`);
   if (currentReason) parts.push(`reason: ${currentReason}`);
+  parts.push(`Next: read ${workerName}'s latest message/output, then assign the next concrete step or mark the task complete.`);
   const message = `${parts.join('. ')}. ${DEFAULT_MARKER}`;
 
   try {

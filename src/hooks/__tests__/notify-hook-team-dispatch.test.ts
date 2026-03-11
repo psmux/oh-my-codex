@@ -235,7 +235,7 @@ describe('notify-hook team dispatch consumer', () => {
         kind: 'mailbox',
         to_worker: 'leader-fixed',
         message_id: msg.message_id,
-        trigger_message: 'leader pane dispatch',
+        trigger_message: 'Read .omx/state/team/alpha/mailbox/leader-fixed.json; worker-1 sent a new message. Reply with the next concrete step.',
       }, cwd);
 
       const modulePath = new URL('../../../scripts/notify-hook/team-dispatch.js', import.meta.url).pathname;
@@ -245,6 +245,7 @@ describe('notify-hook team dispatch consumer', () => {
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf8');
       assert.match(tmuxLog, /send-keys -t %99/);
+      assert.match(tmuxLog, /mailbox\/leader-fixed\.json; worker-1 sent a new message/);
       assert.doesNotMatch(tmuxLog, /send-keys -t .*devsess/);
     } finally {
       if (typeof prevPath === 'string') process.env.PATH = prevPath;

@@ -707,6 +707,7 @@ exit 0
       assert.ok(existsSync(tmuxLogPath), 'tmux should have been called for unknown->idle');
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
       assert.match(tmuxLog, /worker-1 idle/, 'should fire on unknown->idle transition');
+      assert.match(tmuxLog, /Next: read worker-1's latest message\/output, then assign the next concrete step or mark the task complete/, 'per-worker idle nudge should include a next action');
     });
   });
 
@@ -802,7 +803,9 @@ exit 0
       assert.ok(existsSync(tmuxLogPath), 'tmux should have been called');
       const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
       assert.match(tmuxLog, /worker-1 idle/, 'per-worker idle should fire');
+      assert.match(tmuxLog, /Next: read worker-1's latest message\/output, then assign the next concrete step or mark the task complete/, 'per-worker idle nudge should include a next action');
       assert.match(tmuxLog, /All 1 worker idle/, 'all-workers-idle should also fire');
+      assert.match(tmuxLog, /Next: run omx team status both-hooks, check unread worker messages, then assign the next concrete task or shut the team down/, 'all-workers-idle nudge should include a next action');
     });
   });
 });

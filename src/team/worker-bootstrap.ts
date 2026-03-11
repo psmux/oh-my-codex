@@ -470,7 +470,19 @@ export function generateMailboxTriggerMessage(
   const n = Number.isFinite(count) ? Math.max(1, Math.floor(count)) : 1;
   const mailboxPath = buildInstructionPath(teamStateRoot, 'team', teamName, 'mailbox', workerName + '.json');
   if (teamStateRoot !== '.omx/state') {
-    return `${n} new msg(s): check ${mailboxPath}, act and report progress.`;
+    return `${n} new msg(s): read ${mailboxPath}, act, report progress.`;
   }
-  return `You have ${n} new message(s). Check ${mailboxPath}, act now, and reply with concrete progress (not ACK-only).`;
+  return `You have ${n} new message(s). Read ${mailboxPath}, act now, and reply with concrete progress (not ACK-only).`;
+}
+
+export function generateLeaderMailboxTriggerMessage(
+  teamName: string,
+  fromWorker: string,
+  teamStateRoot: string = '.omx/state',
+): string {
+  const mailboxPath = buildInstructionPath(teamStateRoot, 'team', teamName, 'mailbox', 'leader-fixed.json');
+  if (teamStateRoot !== '.omx/state') {
+    return `Read ${mailboxPath}; new msg from ${fromWorker}. Reply next step.`;
+  }
+  return `Read ${mailboxPath}; ${fromWorker} sent a new message. Reply with the next concrete step.`;
 }

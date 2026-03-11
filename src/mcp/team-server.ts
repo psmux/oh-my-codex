@@ -283,7 +283,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           timeout_ms: { type: 'number', description: 'Maximum wait time in ms (default: 300000, max: 3600000)' },
           nudge_delay_ms: { type: 'number', description: 'Milliseconds a pane must be idle before nudging (default: 30000)' },
           nudge_max_count: { type: 'number', description: 'Maximum nudges per pane (default: 3)' },
-          nudge_message: { type: 'string', description: 'Message sent as nudge (default: "Continue working on your assigned task.")' },
+          nudge_message: { type: 'string', description: 'Message sent as nudge (default: "Next: read your inbox/mailbox, continue your assigned task now, and if blocked send the leader a concrete status update.")' },
           wake_on: { type: 'string', enum: ['terminal', 'event'], description: 'Wake on terminal completion (default) or the next team event.' },
           after_event_id: { type: 'string', description: 'Optional event cursor; in wake_on=event mode, wait for the next event after this id.' },
         },

@@ -15,6 +15,7 @@ import {
   generateShutdownInbox,
   generateTriggerMessage,
   generateMailboxTriggerMessage,
+  generateLeaderMailboxTriggerMessage,
 } from '../worker-bootstrap.js';
 import type { TeamTask } from '../state.js';
 
@@ -331,7 +332,7 @@ describe('worker bootstrap', () => {
   it('generateMailboxTriggerMessage contains mailbox path and count', () => {
     const message = generateMailboxTriggerMessage('worker-2', 'team-mail', 3);
     assert.match(message, /3 new message/);
-    assert.match(message, /\.omx\/state\/team\/team-mail\/mailbox\/worker-2\.json/);
+    assert.match(message, /Read .*\.omx\/state\/team\/team-mail\/mailbox\/worker-2\.json/);
     assert.match(message, /act now/i);
     assert.match(message, /concrete progress/i);
     assert.match(message, /ACK-only/);
@@ -340,9 +341,29 @@ describe('worker bootstrap', () => {
   it('generateMailboxTriggerMessage uses provided state-root reference for worktree workers', () => {
     const message = generateMailboxTriggerMessage('worker-2', 'team-mail', 3, '$OMX_TEAM_STATE_ROOT');
     assert.match(message, /3 new msg/);
-    assert.match(message, /\$OMX_TEAM_STATE_ROOT\/team\/team-mail\/mailbox\/worker-2\.json/);
+    assert.match(message, /read .*\$OMX_TEAM_STATE_ROOT\/team\/team-mail\/mailbox\/worker-2\.json/i);
     assert.match(message, /act/i);
     assert.match(message, /report progress/i);
+    assert.ok(message.length < 200);
+  });
+
+  it('generateLeaderMailboxTriggerMessage is always < 200 characters', () => {
+    const message = generateLeaderMailboxTriggerMessage('team-with-long-name', 'worker-long-name');
+    assert.ok(message.length < 200);
+  });
+
+  it('generateLeaderMailboxTriggerMessage tells the leader to read the mailbox and reply', () => {
+    const message = generateLeaderMailboxTriggerMessage('team-mail', 'worker-2');
+    assert.match(message, /Read .*\.omx\/state\/team\/team-mail\/mailbox\/leader-fixed\.json/);
+    assert.match(message, /worker-2 sent a new message/);
+    assert.match(message, /Reply with the next concrete step/);
+  });
+
+  it('generateLeaderMailboxTriggerMessage uses provided state-root reference for worktree leaders', () => {
+    const message = generateLeaderMailboxTriggerMessage('team-mail', 'worker-2', '$OMX_TEAM_STATE_ROOT');
+    assert.match(message, /read .*\$OMX_TEAM_STATE_ROOT\/team\/team-mail\/mailbox\/leader-fixed\.json/i);
+    assert.match(message, /new msg from worker-2/i);
+    assert.match(message, /reply next step/i);
     assert.ok(message.length < 200);
   });
 

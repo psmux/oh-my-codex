@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NudgeTracker, capturePane, isPaneIdle } from '../idle-nudge.js';
+import { DEFAULT_NUDGE_CONFIG, NudgeTracker, capturePane, isPaneIdle } from '../idle-nudge.js';
 
 function buildFakeTmux(tmuxLogPath: string): string {
   return `#!/usr/bin/env bash
@@ -137,6 +137,15 @@ async function withMockedNow(
 }
 
 describe('idle-nudge', () => {
+  it('uses an explicit next-action default nudge message', () => {
+    assert.equal(
+      DEFAULT_NUDGE_CONFIG.message,
+      'Next: read your inbox/mailbox, continue your assigned task now, and if blocked send the leader a concrete status update.',
+    );
+    const tracker = new NudgeTracker();
+    assert.equal(tracker.totalNudges, 0);
+  });
+
   it('throttles scans that happen too soon after the previous scan', async () => {
     await withFakeTmux(async ({ tmuxLogPath }) => {
       await withMockedNow(10_000, async (setNow) => {

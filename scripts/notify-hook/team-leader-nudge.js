@@ -55,8 +55,18 @@ export function resolveLeaderProgressStallThresholdMs() {
 
 function buildStatusCheckReminder(teamName, { keepPolling = false } = {}) {
   return keepPolling
-    ? `Next: omx team status ${teamName}; keep polling.`
-    : `Next: omx team status ${teamName}.`;
+    ? `Next: omx team status ${teamName}; check messages, assign next step; keep polling.`
+    : `Next: omx team status ${teamName}; check messages, assign next step.`;
+}
+
+function buildMailboxCheckReminder(teamName, { keepPolling = false } = {}) {
+  return keepPolling
+    ? `Next: omx team status ${teamName}; read mailbox messages; reply next step; keep polling.`
+    : `Next: omx team status ${teamName}; read mailbox messages; reply next step.`;
+}
+
+function buildWorkerStartEvidenceReminder(teamName, workerName) {
+  return `Next: check ${workerName} msg/output, confirm task in omx team status ${teamName}, then reassign/nudge.`;
 }
 
 function buildLeaderActionGuidance(teamName, {
@@ -72,7 +82,7 @@ function buildLeaderActionGuidance(teamName, {
 
   if (pendingFollowUpTasks) {
     return workerPanesAlive
-      ? 'Next: reuse this team with a follow-up task.'
+      ? 'Next: assign the next follow-up task to this idle team.'
       : 'Next: launch a new team for the next task set.';
   }
   if (allWorkersIdle && tasksComplete) {
@@ -594,24 +604,24 @@ export async function maybeNudgeTeamLeader({ cwd, stateDir, logsDir, preComputed
       nudgeReason = ACK_WITHOUT_START_EVIDENCE_REASON;
       text =
         `Team ${teamName}: ${ackWithoutStartEvidence.worker} said "${ackWithoutStartEvidence.body}" `
-        + `but has no work-start evidence yet (status: ${ackWithoutStartEvidence.statusState}, no owned in_progress task). `
-        + buildStatusCheckReminder(teamName);
+        + `but has no start evidence (status: ${ackWithoutStartEvidence.statusState}). `
+        + buildWorkerStartEvidenceReminder(teamName, ackWithoutStartEvidence.worker);
     } else if (stalledTeamNudge) {
       nudgeReason = stalledTeamReason;
       const { pending, in_progress, blocked } = progressSnapshot.taskCounts;
       const missingSignals = progressSnapshot.missingSignalWorkers > 0
-        ? `; ${progressSnapshot.missingSignalWorkers} worker signal${progressSnapshot.missingSignalWorkers === 1 ? '' : 's'} missing`
+        ? `; ${progressSnapshot.missingSignalWorkers} signal${progressSnapshot.missingSignalWorkers === 1 ? '' : 's'} missing`
         : '';
       const stallPrefix = leaderStale ? 'leader stale, ' : 'worker panes stalled, ';
       text =
-        `Team ${teamName}: ${stallPrefix}no team progress for ${formatDurationMs(stalledForMs)}. `
+        `Team ${teamName}: ${stallPrefix}no progress ${formatDurationMs(stalledForMs)}. `
         + `${leaderActionGuidance} `
-        + `(pending:${pending} in_progress:${in_progress} blocked:${blocked}${missingSignals})`;
+        + `(p:${pending} ip:${in_progress} b:${blocked}${missingSignals})`;
     } else if (stalePanesNudge && hasNewMessage) {
       nudgeReason = 'stale_leader_with_messages';
       text =
         `Team ${teamName}: leader stale, ${paneStatus.paneCount} pane(s) active, ${messages.length} msg(s) pending. `
-        + leaderActionGuidance;
+        + buildMailboxCheckReminder(teamName, { keepPolling: true });
     } else if (staleFollowupDue) {
       nudgeReason = 'stale_leader_panes_alive';
       text =
@@ -619,7 +629,7 @@ export async function maybeNudgeTeamLeader({ cwd, stateDir, logsDir, preComputed
         + leaderActionGuidance;
     } else if (hasNewMessage) {
       nudgeReason = 'new_mailbox_message';
-      text = `Team ${teamName}: ${messages.length} msg(s) for leader. ${leaderActionGuidance}`;
+      text = `Team ${teamName}: ${messages.length} msg(s) for leader. ${buildMailboxCheckReminder(teamName)}`;
     } else {
       continue;
     }
