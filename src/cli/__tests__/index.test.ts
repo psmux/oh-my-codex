@@ -659,11 +659,12 @@ describe('detached tmux new-session sequencing', () => {
   });
 
   it('buildDetachedSessionBootstrapSteps starts native Windows detached sessions with powershell', () => {
+    const hudCmd = buildWindowsPromptCommand('node', ['omx.js', 'hud', '--watch']);
     const steps = buildDetachedSessionBootstrapSteps(
       'omx-demo',
       'C:/project',
       "'codex' '--dangerously-bypass-approvals-and-sandbox'",
-      "'node' 'omx.js' 'hud' '--watch'",
+      hudCmd,
       '--model gpt-5',
       'C:/codex-home',
       null,
@@ -671,6 +672,8 @@ describe('detached tmux new-session sequencing', () => {
     );
     assert.equal(steps[0]?.name, 'new-session');
     assert.equal(steps[0]?.args.at(-1), 'powershell.exe');
+    assert.equal(steps[1]?.name, 'split-and-capture-hud-pane');
+    assert.equal(steps[1]?.args.at(-1), hudCmd);
   });
 
   it('buildDetachedSessionFinalizeSteps keeps schedule after split-capture and before attach', () => {
@@ -779,10 +782,18 @@ describe('buildTmuxPaneCommand', () => {
 });
 
 describe('buildWindowsPromptCommand', () => {
-  it('quotes detached Windows codex commands for PowerShell prompt injection', () => {
+  it('encodes detached Windows commands for safe PowerShell prompt injection', () => {
+    const result = buildWindowsPromptCommand(
+      'codex',
+      ['--dangerously-bypass-approvals-and-sandbox', '-c', 'model_reasoning_effort="high"', "it's"],
+    );
+    const prefix = 'powershell.exe -NoLogo -NoExit -EncodedCommand ';
+    assert.ok(result.startsWith(prefix));
+    const payload = result.slice(prefix.length);
+    const decoded = Buffer.from(payload, 'base64').toString('utf16le');
     assert.equal(
-      buildWindowsPromptCommand('codex', ['--dangerously-bypass-approvals-and-sandbox', '-c', 'model_reasoning_effort="high"', "it's"]),
-      "& 'codex' '--dangerously-bypass-approvals-and-sandbox' '-c' 'model_reasoning_effort=\"high\"' 'it''s'",
+      decoded,
+      "$ErrorActionPreference = 'Stop'; & { & 'codex' '--dangerously-bypass-approvals-and-sandbox' '-c' 'model_reasoning_effort=\"high\"' 'it''s' }",
     );
   });
 });

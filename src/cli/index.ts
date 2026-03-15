@@ -169,6 +169,7 @@ const ALLOWED_SHELLS = new Set([
   '/usr/local/bin/bash', '/usr/local/bin/zsh', '/usr/local/bin/fish',
 ]);
 const WINDOWS_DETACHED_BOOTSTRAP_DELAY_MS = 2500;
+const CODEX_VERSION_FLAGS = new Set(['--version', '-V']);
 
 type CliCommand = 'launch' | 'exec' | 'setup' | 'agents-init' | 'deepinit' | 'uninstall' | 'doctor' | 'ask' | 'explore' | 'sparkshell' | 'team' | 'session' | 'resume' | 'version' | 'tmux-hook' | 'hooks' | 'hud' | 'status' | 'cancel' | 'help' | 'reasoning' | string;
 
@@ -1351,8 +1352,11 @@ function runCodex(
     process.env,
     sessionModelInstructionsPath(cwd, sessionId),
   );
+  const nativeWindows = isNativeWindows();
   const omxBin = process.argv[1];
-  const hudCmd = buildTmuxPaneCommand('node', [omxBin, 'hud', '--watch']);
+  const hudCmd = nativeWindows
+    ? buildWindowsPromptCommand('node', [omxBin, 'hud', '--watch'])
+    : buildTmuxPaneCommand('node', [omxBin, 'hud', '--watch']);
   const inheritLeaderFlags = process.env[TEAM_INHERIT_LEADER_FLAGS_ENV] !== '0';
   const workerLaunchArgs = resolveTeamWorkerLaunchArgsEnv(
     process.env[TEAM_WORKER_LAUNCH_ARGS_ENV],
@@ -1371,6 +1375,11 @@ function runCodex(
     : codexEnv;
 
   const launchPolicy = resolveCodexLaunchPolicy(process.env);
+
+  if (isCodexVersionRequest(launchArgs)) {
+    runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+    return;
+  }
 
   if (launchPolicy === 'inside-tmux') {
     // Already in tmux: launch codex in current pane, HUD in bottom split
@@ -1423,7 +1432,6 @@ function runCodex(
     runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
   } else {
     // Not in tmux: create a new tmux session with codex + HUD pane
-    const nativeWindows = isNativeWindows();
     const codexCmd = buildTmuxPaneCommand('codex', launchArgs);
     const detachedWindowsCodexCmd = nativeWindows
       ? buildWindowsPromptCommand('codex', launchArgs)
@@ -1552,8 +1560,21 @@ export function buildTmuxShellCommand(command: string, args: string[]): string {
   return [quoteShellArg(command), ...args.map(quoteShellArg)].join(' ');
 }
 
+function encodePowerShellCommand(commandText: string): string {
+  return Buffer.from(commandText, 'utf16le').toString('base64');
+}
+
+function isCodexVersionRequest(args: string[]): boolean {
+  return args.some((arg) => CODEX_VERSION_FLAGS.has(arg));
+}
+
 export function buildWindowsPromptCommand(command: string, args: string[]): string {
-  return ['&', quotePowerShellArg(command), ...args.map(quotePowerShellArg)].join(' ');
+  const invocation = ['&', quotePowerShellArg(command), ...args.map(quotePowerShellArg)].join(' ');
+  const wrappedCommand = [
+    "$ErrorActionPreference = 'Stop'",
+    `& { ${invocation} }`,
+  ].join('; ');
+  return `powershell.exe -NoLogo -NoExit -EncodedCommand ${encodePowerShellCommand(wrappedCommand)}`;
 }
 
 /**
