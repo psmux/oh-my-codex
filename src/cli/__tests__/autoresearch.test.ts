@@ -287,9 +287,10 @@ EOF
 
       assert.equal(result.status, 0, result.stderr || result.stdout);
 
-      const state = JSON.parse(await readFile(join(repo, '.omx', 'state', 'autoresearch-state.json'), 'utf-8')) as { active: boolean; current_phase?: string };
+      const state = JSON.parse(await readFile(join(repo, '.omx', 'state', 'autoresearch-state.json'), 'utf-8')) as {
+        active: boolean;
+      };
       assert.equal(state.active, false);
-      assert.equal(state.current_phase, 'cancelled');
 
       const logsRoot = join(repo, '.omx', 'logs', 'autoresearch');
       const [runId] = execFileSync('find', [logsRoot, '-mindepth', '1', '-maxdepth', '1', '-type', 'd', '-printf', '%f\n'], { encoding: 'utf-8' })
@@ -298,10 +299,23 @@ EOF
         .filter(Boolean);
       assert.ok(runId);
 
+      const manifest = JSON.parse(await readFile(join(logsRoot, runId, 'manifest.json'), 'utf-8')) as {
+        status: string;
+        stop_reason: string | null;
+        completed_at: string | null;
+      };
+      assert.equal(manifest.status, 'stopped');
+      assert.equal(manifest.stop_reason, 'repeated noop limit reached (3)');
+      assert.match(manifest.completed_at || '', /^\d{4}-\d{2}-\d{2}T/);
+
       const ledger = JSON.parse(await readFile(join(logsRoot, runId, 'iteration-ledger.json'), 'utf-8')) as {
         entries: Array<{ decision: string }>;
       };
       assert.deepEqual(ledger.entries.map((entry) => entry.decision), ['baseline', 'noop', 'noop', 'noop']);
+
+      const resumeResult = runOmx(repo, ['autoresearch', '--resume', runId]);
+      assert.notEqual(resumeResult.status, 0, resumeResult.stderr || resumeResult.stdout);
+      assert.match(`${resumeResult.stderr}\n${resumeResult.stdout}`, /autoresearch_resume_terminal_run/i);
     } finally {
       await rm(repo, { recursive: true, force: true });
       await rm(fakeBin, { recursive: true, force: true });

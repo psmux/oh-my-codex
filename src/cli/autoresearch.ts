@@ -4,12 +4,12 @@ import { ensureWorktree, planWorktreeTarget } from '../team/worktree.js';
 import { loadAutoresearchMissionContract } from '../autoresearch/contracts.js';
 import {
   countTrailingAutoresearchNoops,
+  finalizeAutoresearchRunState,
   loadAutoresearchRunManifest,
   materializeAutoresearchMissionToWorktree,
   prepareAutoresearchRuntime,
   processAutoresearchCandidate,
   resumeAutoresearchRuntime,
-  stopAutoresearchRuntime,
   buildAutoresearchRunTag,
 } from '../autoresearch/runtime.js';
 import { assertModeStartAllowed } from '../modes/base.js';
@@ -125,7 +125,10 @@ async function runAutoresearchLoop(
       if (decision === 'noop') {
         const trailingNoops = await countTrailingAutoresearchNoops(manifest.ledger_file);
         if (trailingNoops >= AUTORESEARCH_MAX_CONSECUTIVE_NOOPS) {
-          await stopAutoresearchRuntime(runtime.repoRoot);
+          await finalizeAutoresearchRunState(runtime.repoRoot, manifest.run_id, {
+            status: 'stopped',
+            stopReason: `repeated noop limit reached (${AUTORESEARCH_MAX_CONSECUTIVE_NOOPS})`,
+          });
           return;
         }
       }

@@ -1265,9 +1265,32 @@ export async function processAutoresearchCandidate(
   return decision.decision;
 }
 
+export async function finalizeAutoresearchRunState(
+  projectRoot: string,
+  runId: string,
+  updates: { status: AutoresearchRunStatus; stopReason: string },
+): Promise<void> {
+  const manifest = await loadAutoresearchRunManifest(projectRoot, runId);
+  if (manifest.status !== 'running') {
+    return;
+  }
+  await finalizeRun(manifest, projectRoot, updates);
+}
+
 export async function stopAutoresearchRuntime(projectRoot: string): Promise<void> {
   const state = await readModeState('autoresearch', projectRoot);
-  if (state?.active) {
-    await cancelMode('autoresearch', projectRoot);
+  if (!state?.active) {
+    return;
   }
+
+  const runId = typeof state.run_id === 'string' ? state.run_id : null;
+  if (runId) {
+    await finalizeAutoresearchRunState(projectRoot, runId, {
+      status: 'stopped',
+      stopReason: 'operator stop',
+    });
+    return;
+  }
+
+  await cancelMode('autoresearch', projectRoot);
 }
