@@ -785,32 +785,19 @@ async function reasoningCommand(args: string[]): Promise<void> {
 }
 
 export async function launchWithHud(args: string[]): Promise<void> {
-  if (isNativeWindows()) {
-    const { result } = spawnPlatformCommandSync("tmux", ["-V"], {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    if (result.error) {
-      const errno = result.error as NodeJS.ErrnoException;
-      const kind = classifySpawnError(errno);
-      if (kind === "missing") {
-        console.warn(
-          "[omx] warning: tmux was not found on native Windows. Continuing without tmux/HUD.\n" +
-            "[omx] To enable tmux-backed features, install psmux:\n" +
-            "[omx]   winget install psmux\n" +
-            "[omx] See: https://github.com/marlocarlo/psmux",
-        );
-      } else {
-        console.warn(
-          `[omx] warning: tmux probe failed on native Windows (${errno.code || errno.message}). Continuing without tmux/HUD.`,
-        );
-      }
-    } else if (result.status !== 0 && !isTmuxAvailable()) {
-      const stderr = (result.stderr || "").trim();
-      console.warn(
-        `[omx] warning: tmux reported an error on native Windows${stderr ? ` (${stderr})` : ""}. Continuing without tmux/HUD.`,
-      );
-    }
+  // ── Win32 guard ──────────────────────────────────────────────────────
+  if (isNativeWindows() && !isTmuxAvailable()) {
+    console.error(
+      '[omx] OMX requires tmux, which was not found on this system.\n' +
+      '[omx] Install a tmux provider for your platform:\n' +
+      '[omx]   - Windows: winget install psmux  (native tmux for Windows)\n' +
+      '[omx]   - WSL2: sudo apt install tmux\n' +
+      '[omx]   - macOS: brew install tmux\n' +
+      '[omx]   - Linux: sudo apt install tmux\n' +
+      '[omx] See: https://github.com/marlocarlo/psmux',
+    );
+    process.exitCode = 1;
+    return;
   }
 
   const launchCwd = process.cwd();

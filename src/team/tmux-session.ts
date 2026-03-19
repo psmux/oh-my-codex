@@ -17,7 +17,7 @@ import {
   paneLooksReady as sharedPaneLooksReady,
 } from '../../scripts/tmux-hook-engine.js';
 import { sleep, sleepSync } from '../utils/sleep.js';
-import { classifySpawnError, resolveCommandPathForPlatform, spawnPlatformCommandSync } from '../utils/platform-command.js';
+import { classifySpawnError, spawnPlatformCommandSync } from '../utils/platform-command.js';
 
 const execFileAsync = promisify(execFile);
 import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_TEAM_HEIGHT_LINES } from '../hud/constants.js';
@@ -579,7 +579,12 @@ function commandExists(binary: string): boolean {
  * Returns the absolute path or the bare command name as fallback.
  */
 function resolveAbsoluteBinaryPath(binary: string): string {
-  return resolveCommandPathForPlatform(binary) || binary;
+  const finder = process.platform === 'win32' ? 'where' : 'which';
+  const result = spawnSync(finder, [binary], { encoding: 'utf-8', timeout: 5000 });
+  if (result.status === 0 && result.stdout.trim()) {
+    return result.stdout.trim().split('\n')[0];
+  }
+  return binary;
 }
 
 /**
