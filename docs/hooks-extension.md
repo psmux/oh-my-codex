@@ -11,7 +11,7 @@ OMX supports an additive hooks extension point for user plugins under `.omx/hook
 omx hooks init
 omx hooks status
 omx hooks validate
-OMX_HOOK_PLUGINS=1 omx hooks test
+omx hooks test
 ```
 
 This creates a scaffold plugin at:
@@ -20,12 +20,12 @@ This creates a scaffold plugin at:
 
 ## Enablement model
 
-Plugins are **disabled by default**.
+Plugins are **enabled by default**.
 
-Enable plugin dispatch explicitly:
+Disable plugin dispatch explicitly:
 
 ```bash
-export OMX_HOOK_PLUGINS=1
+export OMX_HOOK_PLUGINS=0
 ```
 
 Optional timeout tuning (default: 1500ms):
@@ -42,6 +42,8 @@ Native events are emitted from existing lifecycle/notify paths:
 - `session-end`
 - `turn-complete`
 - `session-idle`
+
+Pass one keeps this existing event vocabulary; it does **not** introduce an event-taxonomy redesign.
 
 For clawhip-oriented operational routing, see [Clawhip Event Contract](./clawhip-event-contract.md).
 
@@ -94,6 +96,20 @@ SDK surface includes:
 - `sdk.tmux.sendKeys(...)`
 - `sdk.log.info|warn|error(...)`
 - `sdk.state.read|write|delete|all(...)` (plugin namespace scoped)
+- `sdk.omx.session.read()`
+- `sdk.omx.hud.read()`
+- `sdk.omx.notifyFallback.read()`
+- `sdk.omx.updateCheck.read()`
+
+`sdk.omx` is intentionally narrow and read-only in pass one. These helpers read the
+repo-root `.omx/state/*.json` runtime files for the current workspace.
+
+Compatibility notes:
+
+- `omx tmux-hook` remains a CLI/runtime workflow, not `sdk.omx.tmuxHook.*`
+- pass one does not add `sdk.omx.tmuxHook.*`; tmux plugin behavior stays on `sdk.tmux.sendKeys(...)`
+- pass one does not add generic `sdk.omx.readJson(...)`, `sdk.omx.list()`, or `sdk.omx.exists()`
+- pass one does not add `sdk.pluginState`; keep using `sdk.state`
 
 ## Logs
 

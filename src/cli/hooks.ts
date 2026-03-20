@@ -100,7 +100,7 @@ async function initHooks(): Promise<void> {
 
   await writeFile(samplePath, SAMPLE_PLUGIN);
   console.log(`Created ${samplePath}`);
-  console.log('Plugins are enabled by default. Disable with: OMX_HOOK_PLUGINS=0');
+  console.log('Plugins are enabled by default. Disable with OMX_HOOK_PLUGINS=0.');
 }
 
 async function statusHooks(): Promise<void> {
@@ -111,7 +111,9 @@ async function statusHooks(): Promise<void> {
   console.log('hooks status');
   console.log('-----------');
   console.log(`Directory: ${dir}`);
-  console.log(`Plugins enabled: ${isHookPluginsEnabled(process.env) ? 'yes' : 'no (set OMX_HOOK_PLUGINS=1 to override)'}`);
+  console.log(
+    `Plugins enabled: ${isHookPluginsEnabled(process.env) ? 'yes' : 'no (disabled with OMX_HOOK_PLUGINS=0)'}`,
+  );
   console.log(`Discovered plugins: ${plugins.length}`);
   for (const plugin of plugins) {
     console.log(`- ${plugin.fileName}`);

@@ -48,6 +48,7 @@ const SUPPORTED_MODES = [
 	"ultrawork",
 	"ultraqa",
 	"ralplan",
+	"deep-interview",
 ] as const;
 
 const STATE_TOOL_NAMES = new Set([
@@ -259,7 +260,7 @@ export async function handleStateToolCall(request: {
 				await mkdir(getStateDir(cwd, effectiveSessionId), { recursive: true });
 			}
 			const { ensureTmuxHookInitialized } = await import("../cli/tmux-hook.js");
-			await ensureTmuxHookInitialized(cwd, { detectTarget: false });
+			await ensureTmuxHookInitialized(cwd);
 		}
 
 		if (TEAM_COMM_TOOL_NAMES.has(name)) {

@@ -1,6 +1,6 @@
 {
   "name": "oh-my-codex",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "description": "Multi-agent orchestration layer for OpenAI Codex CLI",
   "type": "module",
   "main": "dist/index.js",
@@ -31,6 +31,7 @@
     "build:sparkshell": "node dist/scripts/build-sparkshell.js",
     "smoke:packed-install": "node dist/scripts/smoke-packed-install.js",
     "test:sparkshell": "node dist/scripts/test-sparkshell.js",
+    "test:reply-listener:live": "node dist/scripts/test-reply-listener-live.js",
     "postpack": "npm run clean:native-package-assets"
   },
   "engines": {

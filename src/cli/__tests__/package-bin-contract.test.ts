@@ -54,7 +54,7 @@ describe('package bin contract', () => {
 
     rmSync(packagedSparkShellPath, { force: true });
 
-    const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    const packed = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
       cwd: process.cwd(),
       encoding: 'utf-8',
     });

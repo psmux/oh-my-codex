@@ -3,17 +3,42 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+interface TmuxEnvSnapshot {
+  TMUX?: string;
+  TMUX_PANE?: string;
+}
+
 export interface TempTmuxSessionFixture {
   sessionName: string;
   serverName: string;
   windowTarget: string;
   leaderPaneId: string;
   socketPath: string;
+  serverKind: 'ambient' | 'synthetic';
   env: {
     TMUX: string;
     TMUX_PANE: string;
   };
-  sessionExists: () => boolean;
+  sessionExists: (targetSessionName?: string) => boolean;
+}
+
+export interface TempTmuxSessionOptions {
+  useAmbientServer?: boolean;
+}
+
+function snapshotTmuxEnv(source: NodeJS.ProcessEnv = process.env): TmuxEnvSnapshot {
+  return {
+    TMUX: typeof source.TMUX === 'string' ? source.TMUX : undefined,
+    TMUX_PANE: typeof source.TMUX_PANE === 'string' ? source.TMUX_PANE : undefined,
+  };
+}
+
+function applyTmuxEnv(snapshot: TmuxEnvSnapshot): void {
+  if (typeof snapshot.TMUX === 'string') process.env.TMUX = snapshot.TMUX;
+  else delete process.env.TMUX;
+
+  if (typeof snapshot.TMUX_PANE === 'string') process.env.TMUX_PANE = snapshot.TMUX_PANE;
+  else delete process.env.TMUX_PANE;
 }
 
 function runTmux(
@@ -62,15 +87,27 @@ function uniqueTmuxIdentifier(prefix: string): string {
   return `${prefix}-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export async function withTempTmuxSession<T>(fn: (fixture: TempTmuxSessionFixture) => Promise<T> | T): Promise<T> {
+export async function withTempTmuxSession<T>(
+  optionsOrFn: TempTmuxSessionOptions | ((fixture: TempTmuxSessionFixture) => Promise<T> | T),
+  maybeFn?: (fixture: TempTmuxSessionFixture) => Promise<T> | T,
+): Promise<T> {
   if (!isRealTmuxAvailable()) {
     throw new Error('tmux is not available');
   }
 
+  const options = typeof optionsOrFn === 'function' ? {} : optionsOrFn;
+  const fn = typeof optionsOrFn === 'function' ? optionsOrFn : maybeFn;
+  if (!fn) {
+    throw new Error('withTempTmuxSession requires a callback');
+  }
+
+  const previousEnv = snapshotTmuxEnv(process.env);
   const fixtureCwd = await mkdtemp(join(tmpdir(), 'omx-tmux-fixture-'));
   const sessionName = uniqueTmuxIdentifier('omx-test');
-  const serverName = uniqueTmuxIdentifier('omx-fixture');
-  const tmuxOptions = { ignoreTmuxEnv: true, serverName } as const;
+  const serverName = options.useAmbientServer ? '' : uniqueTmuxIdentifier('omx-fixture');
+  const serverKind: TempTmuxSessionFixture['serverKind'] = options.useAmbientServer ? 'ambient' : 'synthetic';
+  const tmuxOptions = { ignoreTmuxEnv: true, serverName: serverName || undefined } as const;
+
   const created = runTmux([
     'new-session',
     '-d',
@@ -86,15 +123,17 @@ export async function withTempTmuxSession<T>(fn: (fixture: TempTmuxSessionFixtur
   const [windowTarget = '', leaderPaneId = ''] = created.split(/\s+/, 2);
   if (windowTarget === '' || leaderPaneId === '') {
     try {
-      runTmux(['kill-server'], tmuxOptions);
+      if (serverKind === 'synthetic') {
+        runTmux(['kill-server'], tmuxOptions);
+      } else {
+        runTmux(['kill-session', '-t', sessionName], tmuxOptions);
+      }
     } catch {}
     await rm(fixtureCwd, { recursive: true, force: true });
     throw new Error(`failed to create temporary tmux fixture: ${created}`);
   }
 
   const socketPath = runTmux(['display-message', '-p', '-t', leaderPaneId, '#{socket_path}'], tmuxOptions);
-  const previousTmux = process.env.TMUX;
-  const previousTmuxPane = process.env.TMUX_PANE;
   process.env.TMUX = `${socketPath},${process.pid},0`;
   process.env.TMUX_PANE = leaderPaneId;
 
@@ -104,23 +143,25 @@ export async function withTempTmuxSession<T>(fn: (fixture: TempTmuxSessionFixtur
     windowTarget,
     leaderPaneId,
     socketPath,
+    serverKind,
     env: {
       TMUX: process.env.TMUX,
       TMUX_PANE: leaderPaneId,
     },
-    sessionExists: () => tmuxSessionExists(sessionName, serverName),
+    sessionExists: (targetSessionName = sessionName) => tmuxSessionExists(targetSessionName, serverName || undefined),
   };
 
   try {
     return await fn(fixture);
   } finally {
     try {
-      runTmux(['kill-server'], tmuxOptions);
+      if (serverKind === 'synthetic') {
+        runTmux(['kill-server'], tmuxOptions);
+      } else {
+        runTmux(['kill-session', '-t', sessionName], tmuxOptions);
+      }
     } catch {}
-    if (typeof previousTmux === 'string') process.env.TMUX = previousTmux;
-    else delete process.env.TMUX;
-    if (typeof previousTmuxPane === 'string') process.env.TMUX_PANE = previousTmuxPane;
-    else delete process.env.TMUX_PANE;
+    applyTmuxEnv(previousEnv);
     await rm(fixtureCwd, { recursive: true, force: true });
   }
 }

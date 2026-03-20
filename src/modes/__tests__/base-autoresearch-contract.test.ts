@@ -5,6 +5,23 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readModeState, startMode } from '../base.js';
 
+describe('modes/base deep-interview contract integration', () => {
+  it('startMode persists deep-interview state', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-mode-deep-interview-contract-'));
+    try {
+      const started = await startMode('deep-interview', 'clarify a vague request', 3, wd);
+      assert.equal(started.mode, 'deep-interview');
+      assert.equal(started.active, true);
+      assert.equal(started.current_phase, 'starting');
+      const persisted = await readModeState('deep-interview', wd);
+      assert.equal(persisted?.mode, 'deep-interview');
+      assert.equal(persisted?.task_description, 'clarify a vague request');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('modes/base autoresearch contract integration', () => {
   it('startMode blocks autoresearch when ralph is active', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-mode-autoresearch-contract-'));
