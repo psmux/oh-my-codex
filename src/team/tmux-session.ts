@@ -1038,6 +1038,32 @@ function paneHasTrustPrompt(captured: string): boolean {
   return hasQuestion && hasActiveChoices;
 }
 
+function paneHasClaudeBypassPermissionsPrompt(captured: string): boolean {
+  const lines = captured
+    .split('\n')
+    .map((line) => line.replace(/\r/g, '').trim())
+    .filter((line) => line.length > 0);
+  const tail = lines.slice(-20);
+  const hasWarning = tail.some((line) => /Bypass Permissions mode/i.test(line));
+  const hasChoices = tail.some((line) => /No,\s*exit/i.test(line))
+    && tail.some((line) => /Yes,\s*I\s*accept/i.test(line))
+    && tail.some((line) => /Enter\s*to\s*confirm/i.test(line));
+  return hasWarning && hasChoices;
+}
+
+function acceptClaudeBypassPermissionsPrompt(target: string): void {
+  runTmux(['send-keys', '-t', target, '-l', '--', '2']);
+  sleepFractionalSeconds(0.12);
+  runTmux(['send-keys', '-t', target, 'C-m']);
+}
+
+function dismissClaudeBypassPermissionsPromptIfPresent(target: string, captured: string): boolean {
+  if (process.env.OMX_TEAM_AUTO_ACCEPT_BYPASS === '0') return false;
+  if (!paneHasClaudeBypassPermissionsPrompt(captured)) return false;
+  acceptClaudeBypassPermissionsPrompt(target);
+  return true;
+}
+
 export const paneHasActiveTask = sharedPaneHasActiveTask;
 
 function resolveSendStrategyFromEnv(): 'auto' | 'queue' | 'interrupt' {
@@ -1175,7 +1201,7 @@ export function waitForWorkerReady(
   const maxBackoffMs = 8000;
   const startedAt = Date.now();
   let blockedByTrustPrompt = false;
-  let trustPromptDismissed = false;
+  let promptDismissed = false;
 
   const sendRobustEnter = (): void => {
     const target = paneTarget(sessionName, workerIndex, workerPaneId);
@@ -1187,14 +1213,22 @@ export function waitForWorkerReady(
   };
 
   const check = (): boolean => {
-    const result = runTmux(['capture-pane', '-t', paneTarget(sessionName, workerIndex, workerPaneId), '-p']);
+    const target = paneTarget(sessionName, workerIndex, workerPaneId);
+    const result = runTmux(['capture-pane', '-t', target, '-p']);
     if (!result.ok) return false;
+    if (dismissClaudeBypassPermissionsPromptIfPresent(target, result.stdout)) {
+      promptDismissed = true;
+      return false;
+    }
+    if (paneHasClaudeBypassPermissionsPrompt(result.stdout)) {
+      return false;
+    }
     if (paneHasTrustPrompt(result.stdout)) {
       // Default-on for team workers: they are spawned explicitly by the leader in the same cwd.
       // Opt-out by setting OMX_TEAM_AUTO_TRUST=0.
       if (process.env.OMX_TEAM_AUTO_TRUST !== '0') {
         sendRobustEnter();
-        trustPromptDismissed = true;
+        promptDismissed = true;
         return false;
       }
       blockedByTrustPrompt = true;
@@ -1209,9 +1243,9 @@ export function waitForWorkerReady(
     if (blockedByTrustPrompt) return false;
     // After dismissing a trust prompt, reset backoff so we re-check quickly
     // instead of sleeping 2s/4s/8s while the worker is starting up.
-    if (trustPromptDismissed) {
+    if (promptDismissed) {
       delayMs = initialBackoffMs;
-      trustPromptDismissed = false;
+      promptDismissed = false;
     }
     const remaining = timeoutMs - (Date.now() - startedAt);
     if (remaining <= 0) break;
@@ -1290,6 +1324,9 @@ export async function sendToWorker(
   // doesn't get typed into the trust screen and ignored.
   const capturedStr = await capturePaneAsync(target);
   const paneBusy = paneHasActiveTask(capturedStr);
+  if (dismissClaudeBypassPermissionsPromptIfPresent(target, capturedStr)) {
+    await sleep(200);
+  }
   if (paneHasTrustPrompt(capturedStr)) {
     await sendKeyAsync(target, 'C-m');
     await sleep(120);

@@ -339,6 +339,8 @@ Useful runtime env vars:
   - Skip readiness wait (debug only)
 - `OMX_TEAM_AUTO_TRUST=0`
   - Disable auto-advance for trust prompt (default behavior auto-advances)
+- `OMX_TEAM_AUTO_ACCEPT_BYPASS=0`
+  - Disable Claude bypass-permissions prompt auto-accept (default behavior auto-accepts `2` + Enter)
 - `OMX_TEAM_WORKER_LAUNCH_ARGS`
   - Extra args passed to worker launch command
 - `OMX_TEAM_WORKER_CLI`

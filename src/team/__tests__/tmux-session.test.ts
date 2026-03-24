@@ -78,6 +78,22 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const CLAUDE_BYPASS_PROMPT_CAPTURE = `Bypass Permissions mode
+
+1. No, exit
+2. Yes, I accept
+
+Press Enter to confirm`;
+
+const READY_HELPER_CAPTURE = `╭────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.114.0)                 │
+│                                            │
+│ model:     gpt-5.4 high   /model to change │
+│ directory: ~/Workspace/demo                │
+╰────────────────────────────────────────────╯
+
+How can I help you today?`;
+
 async function withMockTmuxFixture<T>(
   dirPrefix: string,
   tmuxScript: (tmuxLogPath: string) => string,
@@ -260,6 +276,50 @@ describe('sendToWorker validation', () => {
     await assert.rejects(
       sendToWorker('omx-team-x', 1, `hello [OMX_TMUX_INJECT]`),
       /marker/i
+    );
+  });
+
+  it('auto-accepts the Claude bypass prompt before sending worker text', async () => {
+    await withMockTmuxFixture(
+      'omx-tmux-claude-bypass-send-',
+      (logPath) => `#!/bin/sh
+set -eu
+state_dir="$(dirname "${logPath}")"
+accepted_file="$state_dir/accepted"
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    if [ -f "$accepted_file" ]; then
+      cat <<'EOF'
+How can I help you today?
+EOF
+    else
+      cat <<'EOF'
+${CLAUDE_BYPASS_PROMPT_CAPTURE}
+EOF
+    fi
+    exit 0
+    ;;
+  send-keys)
+    if [ "\${4:-}" = "-l" ] && [ "\${6:-}" = "2" ]; then
+      : > "$accepted_file"
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+      async ({ logPath }) => {
+        await sendToWorker('omx-team-x', 1, 'check inbox');
+        const log = await readFile(logPath, 'utf-8');
+        const acceptIndex = log.indexOf('send-keys -t omx-team-x:1 -l -- 2');
+        const submitIndex = log.indexOf('send-keys -t omx-team-x:1 -l -- check inbox');
+        assert.notEqual(acceptIndex, -1, `expected bypass acceptance in log:\n${log}`);
+        assert.notEqual(submitIndex, -1, `expected worker text submission in log:\n${log}`);
+        assert.ok(acceptIndex < submitIndex, `expected bypass acceptance before worker text:\n${log}`);
+      },
     );
   });
 });
@@ -604,7 +664,7 @@ describe('buildWorkerStartupCommand', () => {
 
   it('uses bash with ~/.bashrc and preserves launch args', () => {
     const prevShell = process.env.SHELL;
-    process.env.SHELL = '/usr/bin/bash';
+    process.env.SHELL = '/bin/bash';
     const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
     process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
     try {
@@ -1297,6 +1357,80 @@ esac
         assert.equal(waitForWorkerReady('omx-team-x', 1, 1_000), true);
       },
     );
+  });
+
+  it('waitForWorkerReady auto-accepts the Claude bypass prompt', async () => {
+    await withMockTmuxFixture(
+      'omx-tmux-claude-bypass-ready-',
+      (logPath) => `#!/bin/sh
+set -eu
+state_dir="$(dirname "${logPath}")"
+accepted_file="$state_dir/accepted"
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    if [ -f "$accepted_file" ]; then
+      cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+    else
+      cat <<'EOF'
+${CLAUDE_BYPASS_PROMPT_CAPTURE}
+EOF
+    fi
+    exit 0
+    ;;
+  send-keys)
+    if [ "\${4:-}" = "-l" ] && [ "\${6:-}" = "2" ]; then
+      : > "$accepted_file"
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+      async ({ logPath }) => {
+        assert.equal(waitForWorkerReady('omx-team-x', 1, 1_000), true);
+        const log = await readFile(logPath, 'utf-8');
+        assert.match(log, /send-keys -t omx-team-x:1 -l -- 2/);
+        assert.match(log, /send-keys -t omx-team-x:1 C-m/);
+      },
+    );
+  });
+
+  it('waitForWorkerReady leaves the Claude bypass prompt untouched when auto-accept is disabled', async () => {
+    const previousAutoAccept = process.env.OMX_TEAM_AUTO_ACCEPT_BYPASS;
+    process.env.OMX_TEAM_AUTO_ACCEPT_BYPASS = '0';
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-claude-bypass-blocked-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    cat <<'EOF'
+${CLAUDE_BYPASS_PROMPT_CAPTURE}
+EOF
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+        async ({ logPath }) => {
+          assert.equal(waitForWorkerReady('omx-team-x', 1, 250), false);
+          const log = await readFile(logPath, 'utf-8');
+          assert.doesNotMatch(log, /send-keys/);
+        },
+      );
+    } finally {
+      if (typeof previousAutoAccept === 'string') process.env.OMX_TEAM_AUTO_ACCEPT_BYPASS = previousAutoAccept;
+      else delete process.env.OMX_TEAM_AUTO_ACCEPT_BYPASS;
+    }
   });
 
   it('waitForWorkerReady returns false on timeout', () => {
