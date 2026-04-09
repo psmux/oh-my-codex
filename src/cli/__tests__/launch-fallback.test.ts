@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const CLI_SPAWN_TIMEOUT_MS = 15_000;
+
 function runOmx(
   cwd: string,
   argv: string[],
@@ -17,6 +19,8 @@ function runOmx(
   const result = spawnSync(process.execPath, [omxBin, ...argv], {
     cwd,
     encoding: 'utf-8',
+    timeout: CLI_SPAWN_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
     env: {
       ...process.env,
       ...envOverrides,
@@ -46,6 +50,8 @@ function runOmxWithTty(
   const result = spawnSync('script', ['-qfec', command, '/dev/null'], {
     cwd,
     encoding: 'utf-8',
+    timeout: CLI_SPAWN_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
     env: {
       ...process.env,
       ...envOverrides,
