@@ -14,6 +14,7 @@ jobs:
   rustfmt:
     name: Rust Format
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -26,6 +27,7 @@ jobs:
   clippy:
     name: Rust Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -38,6 +40,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v6
@@ -50,6 +53,7 @@ jobs:
   typecheck:
     name: Typecheck (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +71,7 @@ jobs:
   test:
     name: Test (Node ${{ matrix.node-version }} / ${{ matrix.lane }})
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -105,6 +110,7 @@ jobs:
   coverage-team-critical:
     name: Coverage Gate (Team Critical)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [typecheck]
     steps:
       - uses: actions/checkout@v4
@@ -142,6 +148,7 @@ jobs:
   coverage-ts-full:
     name: Coverage Report (TypeScript Full)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [typecheck]
     steps:
       - uses: actions/checkout@v4
@@ -179,6 +186,7 @@ jobs:
   coverage-rust:
     name: Coverage Report (Rust)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [lint]
     steps:
       - uses: actions/checkout@v4
@@ -223,6 +231,7 @@ jobs:
   ralph-persistence-gate:
     name: Ralph Persistence Gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [typecheck]
     steps:
       - uses: actions/checkout@v4
@@ -245,6 +254,7 @@ jobs:
   build:
     name: Build (Full Source Build)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [rustfmt, clippy, lint, typecheck, test, ralph-persistence-gate]
     steps:
       - uses: actions/checkout@v4
@@ -261,6 +271,7 @@ jobs:
     name: CI Status
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [rustfmt, clippy, lint, typecheck, test, coverage-team-critical, coverage-ts-full, coverage-rust, ralph-persistence-gate, build]
     steps:
       - name: Check required job results

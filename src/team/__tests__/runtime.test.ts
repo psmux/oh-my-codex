@@ -152,6 +152,69 @@ async function waitForFileText(
   throw new Error(`timed out waiting for ${filePath}`);
 }
 
+async function writeFakePromptWorkerBinary(
+  binaryPath: string,
+  scriptBody: string,
+  options: { emitStartupEvidence?: boolean } = {},
+): Promise<void> {
+  const bootstrap = options.emitStartupEvidence === false
+    ? ''
+    : `
+const fs = require('fs');
+const path = require('path');
+const stateRoot = process.env.OMX_TEAM_STATE_ROOT;
+const worker = String(process.env.OMX_TEAM_WORKER || '');
+const [teamName, workerName] = worker.split('/');
+if (stateRoot && teamName && workerName) {
+  const workerDir = path.join(stateRoot, 'team', teamName, 'workers', workerName);
+  fs.mkdirSync(workerDir, { recursive: true });
+  fs.writeFileSync(path.join(workerDir, 'status.json'), JSON.stringify({
+    state: 'working',
+    current_task_id: '1',
+    updated_at: new Date().toISOString(),
+  }, null, 2));
+}
+`;
+  await writeFile(
+    binaryPath,
+    `#!/usr/bin/env node
+${bootstrap}
+${scriptBody}
+`,
+    { mode: 0o755 },
+  );
+}
+
+async function withPromptModeCodexEnv<T>(
+  binDir: string,
+  extraEnv: Record<string, string | undefined>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  const nextEnv: Record<string, string | undefined> = {
+    PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    TMUX: undefined,
+    OMX_TEAM_WORKER_LAUNCH_MODE: 'prompt',
+    OMX_TEAM_WORKER_CLI: 'codex',
+    ...extraEnv,
+  };
+
+  for (const [key, value] of Object.entries(nextEnv)) {
+    previous.set(key, process.env[key]);
+    if (typeof value === 'string') process.env[key] = value;
+    else delete process.env[key];
+  }
+
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of previous) {
+      if (typeof value === 'string') process.env[key] = value;
+      else delete process.env[key];
+    }
+  }
+}
+
 type MockBinarySpec = {
   name: string;
   content: string;
@@ -1969,44 +2032,36 @@ process.on('SIGTERM', () => process.exit(0));
     const binDir = join(cwd, 'bin');
     const fakeCodexPath = join(binDir, 'codex');
     await mkdir(binDir, { recursive: true });
-    await writeFile(
+    await writeFakePromptWorkerBinary(
       fakeCodexPath,
-      `#!/usr/bin/env node
+      `
 process.stdin.resume();
 setInterval(() => {}, 1000);
 process.on('SIGTERM', () => {
   // Intentionally ignore SIGTERM so runtime teardown must escalate.
 });
 `,
-      { mode: 0o755 },
     );
-
-    const prevPath = process.env.PATH;
-    const prevTmux = process.env.TMUX;
-    const prevLaunchMode = process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
-    const prevWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
-
-    process.env.PATH = `${binDir}:${prevPath ?? ''}`;
-    delete process.env.TMUX;
-    process.env.OMX_TEAM_WORKER_LAUNCH_MODE = 'prompt';
-    process.env.OMX_TEAM_WORKER_CLI = 'codex';
 
     let runtime: TeamRuntime | null = null;
     let workerPid = 0;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-prompt-stubborn',
-          'prompt-mode stubborn worker teardown',
-          'executor',
-          1,
-          [{ subject: 's', description: 'd', owner: 'worker-1' }],
-          cwd,
-        ));
+      runtime = await withPromptModeCodexEnv(binDir, {}, () =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-prompt-stubborn',
+            'prompt-mode stubborn worker teardown',
+            'executor',
+            1,
+            [{ subject: 's', description: 'd', owner: 'worker-1' }],
+            cwd,
+          )));
       workerPid = runtime.config.workers[0]?.pid ?? 0;
       assert.ok(workerPid > 0, 'prompt worker PID should be captured');
 
+      const shutdownStartedAt = Date.now();
       await shutdownTeam(runtime.teamName, cwd, { force: true });
+      const shutdownDurationMs = Date.now() - shutdownStartedAt;
       runtime = null;
 
       let alive = false;
@@ -2017,18 +2072,14 @@ process.on('SIGTERM', () => {
         alive = false;
       }
       assert.equal(alive, false, `worker pid ${workerPid} should be terminated after shutdown`);
+      assert.ok(
+        shutdownDurationMs < 10_000,
+        `forced prompt-worker shutdown should skip the 15s ack wait (actual ${shutdownDurationMs}ms)`,
+      );
     } finally {
       if (runtime) {
         await shutdownTeam(runtime.teamName, cwd, { force: true }).catch(() => {});
       }
-      if (typeof prevPath === 'string') process.env.PATH = prevPath;
-      else delete process.env.PATH;
-      if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;
-      else delete process.env.TMUX;
-      if (typeof prevLaunchMode === 'string') process.env.OMX_TEAM_WORKER_LAUNCH_MODE = prevLaunchMode;
-      else delete process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
-      if (typeof prevWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevWorkerCli;
-      else delete process.env.OMX_TEAM_WORKER_CLI;
       await rm(cwd, { recursive: true, force: true });
     }
   });
@@ -2039,9 +2090,9 @@ process.on('SIGTERM', () => {
     const fakeCodexPath = join(binDir, 'codex');
     const helperPidPath = join(cwd, 'helper.pid');
     await mkdir(binDir, { recursive: true });
-    await writeFile(
+    await writeFakePromptWorkerBinary(
       fakeCodexPath,
-      `#!/usr/bin/env node
+      `
 const { spawn } = require('child_process');
 const { writeFileSync } = require('fs');
 const helper = spawn(process.execPath, ['-e', \`
@@ -2054,33 +2105,21 @@ process.stdin.resume();
 setInterval(() => {}, 1000);
 process.on('SIGTERM', () => process.exit(0));
 `,
-      { mode: 0o755 },
     );
-
-    const prevPath = process.env.PATH;
-    const prevTmux = process.env.TMUX;
-    const prevLaunchMode = process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
-    const prevWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
-    const prevHelperPidPath = process.env.OMX_HELPER_PID_PATH;
-
-    process.env.PATH = `${binDir}:${prevPath ?? ''}`;
-    delete process.env.TMUX;
-    process.env.OMX_TEAM_WORKER_LAUNCH_MODE = 'prompt';
-    process.env.OMX_TEAM_WORKER_CLI = 'codex';
-    process.env.OMX_HELPER_PID_PATH = helperPidPath;
 
     let runtime: TeamRuntime | null = null;
     let helperPid = 0;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-prompt-descendants',
-          'prompt-mode detached descendant teardown',
-          'executor',
-          1,
-          [{ subject: 's', description: 'd', owner: 'worker-1' }],
-          cwd,
-        ));
+      runtime = await withPromptModeCodexEnv(binDir, { OMX_HELPER_PID_PATH: helperPidPath }, () =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-prompt-descendants',
+            'prompt-mode detached descendant teardown',
+            'executor',
+            1,
+            [{ subject: 's', description: 'd', owner: 'worker-1' }],
+            cwd,
+          )));
 
       for (let attempt = 0; attempt < 40; attempt += 1) {
         if (existsSync(helperPidPath)) break;
@@ -2089,7 +2128,9 @@ process.on('SIGTERM', () => process.exit(0));
       helperPid = Number((await readFile(helperPidPath, 'utf-8')).trim());
       assert.ok(helperPid > 0, 'detached helper pid should be captured');
 
+      const shutdownStartedAt = Date.now();
       await shutdownTeam(runtime.teamName, cwd, { force: true });
+      const shutdownDurationMs = Date.now() - shutdownStartedAt;
       runtime = null;
 
       let alive = false;
@@ -2100,6 +2141,10 @@ process.on('SIGTERM', () => process.exit(0));
         alive = false;
       }
       assert.equal(alive, false, `detached helper pid ${helperPid} should be terminated after shutdown`);
+      assert.ok(
+        shutdownDurationMs < 10_000,
+        `forced descendant teardown should skip the 15s ack wait (actual ${shutdownDurationMs}ms)`,
+      );
     } finally {
       if (runtime) {
         await shutdownTeam(runtime.teamName, cwd, { force: true }).catch(() => {});
@@ -2109,16 +2154,6 @@ process.on('SIGTERM', () => process.exit(0));
           process.kill(helperPid, 'SIGKILL');
         } catch {}
       }
-      if (typeof prevPath === 'string') process.env.PATH = prevPath;
-      else delete process.env.PATH;
-      if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;
-      else delete process.env.TMUX;
-      if (typeof prevLaunchMode === 'string') process.env.OMX_TEAM_WORKER_LAUNCH_MODE = prevLaunchMode;
-      else delete process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
-      if (typeof prevWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevWorkerCli;
-      else delete process.env.OMX_TEAM_WORKER_CLI;
-      if (typeof prevHelperPidPath === 'string') process.env.OMX_HELPER_PID_PATH = prevHelperPidPath;
-      else delete process.env.OMX_HELPER_PID_PATH;
       await rm(cwd, { recursive: true, force: true });
     }
   });

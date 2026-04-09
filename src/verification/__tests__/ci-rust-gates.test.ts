@@ -44,6 +44,31 @@ describe('CI Rust gates', () => {
     assert.match(workflow, /echo "  clippy: \$\{\{ needs\.clippy\.result \}\}"/);
   });
 
+  it('adds timeout-minutes to every CI job so stalled Actions runs fail instead of hanging indefinitely', () => {
+    const workflowPath = join(process.cwd(), '.github', 'workflows', 'ci.yml');
+    const workflow = readFileSync(workflowPath, 'utf-8');
+
+    for (const jobName of [
+      'rustfmt',
+      'clippy',
+      'lint',
+      'typecheck',
+      'test',
+      'coverage-team-critical',
+      'coverage-ts-full',
+      'coverage-rust',
+      'ralph-persistence-gate',
+      'build',
+      'ci-status',
+    ]) {
+      assert.match(
+        workflow,
+        new RegExp(`${jobName}:\\s*\\n(?:.*\\n)*?\\s+timeout-minutes:\\s*\\d+`, 'm'),
+        `${jobName} should define timeout-minutes`,
+      );
+    }
+  });
+
   it('uses the current sparkshell crate manifest in the Rust coverage lane', () => {
     const workflowPath = join(process.cwd(), '.github', 'workflows', 'ci.yml');
     const workflow = readFileSync(workflowPath, 'utf-8');

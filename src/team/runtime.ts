@@ -2763,6 +2763,13 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     }, cwd).catch(() => {});
   }
 
+  if (force && config.worker_launch_mode === 'prompt') {
+    // Prompt-mode workers are raw CLI children, not team-runtime workers that
+    // participate in the shutdown-ack handshake. Waiting the full ack window
+    // before force-killing them only adds deterministic suite slowness.
+    skipWorkerAcks = true;
+  }
+
   const sessionName = config.tmux_session;
   const dispatchPolicy = resolveDispatchPolicy(manifest?.policy, config.worker_launch_mode);
   const shutdownRequestTimes = new Map<string, string>();
