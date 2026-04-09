@@ -345,6 +345,10 @@ function hasExplicitPromptsInvocation(text: string): boolean {
   return /(?:^|\s)\/prompts:[\w.-]+(?=[\s.,!?;:]|$)/i.test(text);
 }
 
+function hasExplicitSkillLikeInvocation(text: string): boolean {
+  return /(?:^|[^\w])\$([a-z][a-z0-9-]*)\b/i.test(text);
+}
+
 function extractExplicitSkillInvocations(text: string): KeywordMatch[] {
   const results: KeywordMatch[] = [];
   const regex = /(?:^|[^\w])\$([a-z][a-z0-9-]*)\b/gi;
@@ -395,6 +399,9 @@ function hasIntentContextForKeyword(text: string, keyword: string): boolean {
 export function detectKeywords(text: string): KeywordMatch[] {
   const explicit = extractExplicitSkillInvocations(text);
   if (hasExplicitPromptsInvocation(text) && explicit.length === 0) {
+    return [];
+  }
+  if (explicit.length === 0 && hasExplicitSkillLikeInvocation(text)) {
     return [];
   }
   if (explicit.length > 0) {

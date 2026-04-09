@@ -225,6 +225,31 @@ describe("codex native hook dispatch", () => {
     }
   });
 
+  it("does not emit UserPromptSubmit routing context for unknown $tokens", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-unknown-token-"));
+    try {
+      await mkdir(join(cwd, ".omx", "state"), { recursive: true });
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "UserPromptSubmit",
+          cwd,
+          session_id: "sess-unknown-1",
+          thread_id: "thread-unknown-1",
+          turn_id: "turn-unknown-1",
+          prompt: "$maer-thinking 다시 설명해봐",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "keyword-detector");
+      assert.equal(result.skillState, null);
+      assert.equal(result.outputJson, null);
+      assert.equal(existsSync(join(cwd, ".omx", "state", "skill-active-state.json")), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("nudges $team prompt-submit routing toward omx team runtime usage", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-team-"));
     try {
@@ -1396,6 +1421,35 @@ describe("codex native hook dispatch", () => {
         systemMessage:
           "OMX Ralph is still active (phase: executing); continue the task and gather fresh verification evidence before stopping.",
       });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not block Stop from stale session-scoped Ralph state that belongs to another session", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-stale-session-ralph-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      await mkdir(join(stateDir, "sessions", "sess-current"), { recursive: true });
+      await mkdir(join(stateDir, "sessions", "sess-stale"), { recursive: true });
+      await writeJson(join(stateDir, "session.json"), { session_id: "sess-current" });
+      await writeJson(join(stateDir, "sessions", "sess-stale", "ralph-state.json"), {
+        active: true,
+        current_phase: "starting",
+        session_id: "sess-stale",
+      });
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "sess-current",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.equal(result.outputJson, null);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

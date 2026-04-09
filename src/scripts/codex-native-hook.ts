@@ -190,26 +190,28 @@ function formatPhase(value: unknown, fallback = "active"): string {
 }
 
 async function readActiveRalphState(stateDir: string): Promise<Record<string, unknown> | null> {
+  const sessionInfo = await readJsonIfExists(join(stateDir, "session.json"));
+  const currentOmxSessionId = safeString(sessionInfo?.session_id).trim();
+  if (currentOmxSessionId) {
+    const sessionScoped = await readJsonIfExists(
+      join(stateDir, "sessions", currentOmxSessionId, "ralph-state.json"),
+    );
+    if (
+      sessionScoped?.active === true
+      && !TERMINAL_RALPH_PHASES.has(
+        safeString(sessionScoped.current_phase).trim().toLowerCase(),
+      )
+    ) {
+      return sessionScoped;
+    }
+  }
+
   const direct = await readJsonIfExists(join(stateDir, "ralph-state.json"));
   if (direct?.active === true && !TERMINAL_RALPH_PHASES.has(safeString(direct.current_phase).trim().toLowerCase())) {
     return direct;
   }
 
-  const sessionInfo = await readJsonIfExists(join(stateDir, "session.json"));
-  const currentOmxSessionId = safeString(sessionInfo?.session_id).trim();
-  if (!currentOmxSessionId) return null;
-
-  const sessionScoped = await readJsonIfExists(
-    join(stateDir, "sessions", currentOmxSessionId, "ralph-state.json"),
-  );
-  if (
-    sessionScoped?.active === true
-    && !TERMINAL_RALPH_PHASES.has(
-      safeString(sessionScoped.current_phase).trim().toLowerCase(),
-    )
-  ) {
-    return sessionScoped;
-  }
+  if (currentOmxSessionId) return null;
 
   const sessionsRoot = join(stateDir, "sessions");
   if (!existsSync(sessionsRoot)) return null;

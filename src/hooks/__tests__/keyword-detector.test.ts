@@ -36,6 +36,13 @@ describe('keyword detector swarm/team compatibility', () => {
     assert.deepEqual(matches.map((m) => m.skill), ['team']);
   });
 
+  it('does not fall back to implicit keyword detection when an unknown $token is present', () => {
+    const matches = detectKeywords('$maer-thinking 다시 설명해봐 keep going');
+    assert.deepEqual(matches, []);
+    const primary = detectPrimaryKeyword('$maer-thinking 다시 설명해봐 keep going');
+    assert.equal(primary, null);
+  });
+
   it('does not auto-detect keywords for explicit /prompts invocation without $skills', () => {
     const matches = detectKeywords('/prompts:architect analyze this issue');
     assert.deepEqual(matches, []);
