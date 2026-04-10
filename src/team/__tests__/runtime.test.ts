@@ -21,6 +21,7 @@ import {
   readMonitorSnapshot,
   claimTask,
   transitionTaskStatus,
+  readWorkerStatus,
   writeWorkerStatus,
 } from '../state.js';
 import {
@@ -40,6 +41,7 @@ import {
 } from '../runtime.js';
 import { resolveTeamLowComplexityDefaultModel } from '../model-contract.js';
 import { readTeamEvents } from '../state/events.js';
+import { sanitizeTeamName } from '../tmux-session.js';
 
 async function initRepo(): Promise<string> {
   const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-worktree-repo-'));
@@ -1277,7 +1279,7 @@ esac
     assert.equal(saveIndex < readyIndex, true);
   });
 
-  it('startTeam rejects interactive startup when fallback delivery never produces startup evidence', async () => {
+  it('startTeam records recoverable startup issues per worker instead of failing launch early when panes stay alive', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-no-startup-evidence-'));
     const previousTmux = process.env.TMUX;
     const previousTmuxPane = process.env.TMUX_PANE;
@@ -1285,6 +1287,8 @@ esac
     const previousWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
     const previousSkipReadyWait = process.env.OMX_TEAM_SKIP_READY_WAIT;
     const previousStartupEvidenceTimeout = process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS;
+    let runtime: TeamRuntime | null = null;
+    const teamName = 'team-no-startup-evidence';
 
     try {
       await withMockTmuxFixture(
@@ -1311,6 +1315,9 @@ case "$1" in
     ;;
   list-panes)
     case "$*" in
+      *"#{pane_dead}"*)
+        echo "0"
+        ;;
       *"#{pane_dead} #{pane_pid}"*)
         echo "0 4242"
         ;;
@@ -1367,25 +1374,308 @@ process.on('SIGTERM', () => process.exit(0));
           process.env.OMX_TEAM_SKIP_READY_WAIT = '1';
           process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS = '500';
 
+          runtime = await withoutTeamWorkerEnv(() =>
+            startTeam(
+              teamName,
+              'interactive startup should keep evaluating per-worker startup issues while panes stay alive',
+              'executor',
+              2,
+              [
+                { subject: 'worker-1 task', description: 'd', owner: 'worker-1' },
+                { subject: 'worker-2 task', description: 'd', owner: 'worker-2' },
+              ],
+              cwd,
+            ));
+
+          const worker1Status = await readWorkerStatus(teamName, 'worker-1', cwd);
+          const worker2Status = await readWorkerStatus(teamName, 'worker-2', cwd);
+          assert.equal(worker1Status.state, 'unknown');
+          assert.equal(worker2Status.state, 'unknown');
+          assert.match(worker1Status.reason ?? '', /startup_no_evidence|fallback_attempted_but_unconfirmed/);
+          assert.match(worker2Status.reason ?? '', /startup_no_evidence|fallback_attempted_but_unconfirmed/);
+
+          const task1 = await readTask(teamName, '1', cwd);
+          const task2 = await readTask(teamName, '2', cwd);
+          assert.equal(task1?.status, 'pending');
+          assert.equal(task2?.status, 'pending');
+        },
+      );
+    } finally {
+      if (runtime) {
+        await shutdownTeam(teamName, cwd, { force: true }).catch(() => {});
+      }
+      if (typeof previousTmux === 'string') process.env.TMUX = previousTmux;
+      else delete process.env.TMUX;
+      if (typeof previousTmuxPane === 'string') process.env.TMUX_PANE = previousTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof previousLaunchMode === 'string') process.env.OMX_TEAM_WORKER_LAUNCH_MODE = previousLaunchMode;
+      else delete process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
+      if (typeof previousWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = previousWorkerCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      if (typeof previousSkipReadyWait === 'string') process.env.OMX_TEAM_SKIP_READY_WAIT = previousSkipReadyWait;
+      else delete process.env.OMX_TEAM_SKIP_READY_WAIT;
+      if (typeof previousStartupEvidenceTimeout === 'string') {
+        process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS = previousStartupEvidenceTimeout;
+      } else {
+        delete process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS;
+      }
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('startTeam still fails startup when the worker pane is dead/unrecoverable', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-dead-startup-pane-'));
+    const previousTmux = process.env.TMUX;
+    const previousTmuxPane = process.env.TMUX_PANE;
+    const previousLaunchMode = process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
+    const previousWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
+    const previousStartupEvidenceTimeout = process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS;
+
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-dead-startup-pane-bin-',
+          tmuxScript: () => `#!/bin/sh
+set -eu
+case "$1" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      *"#{window_width}"*) echo "120" ;;
+      *) echo "leader:0 %1" ;;
+    esac
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"pane_current_command"*)
+        printf "%%1\\tnode\\t'codex'\\n"
+        ;;
+      *"#{pane_dead} #{pane_pid}"*)
+        echo "1 4242"
+        ;;
+      *"#{pane_pid}"*)
+        echo "4242"
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+  capture-pane)
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *" -h "*) echo "%2" ;;
+      *) echo "%3" ;;
+    esac
+    exit 0
+    ;;
+  set-hook|run-shell|select-layout|set-window-option|select-pane|send-keys|kill-pane|kill-session|resize-pane)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+          binaries: [{ name: 'codex', content: '#!/usr/bin/env node\nprocess.stdin.resume();\n' }],
+        },
+        async () => {
+          delete process.env.TMUX;
+          process.env.TMUX_PANE = '%1';
+          process.env.OMX_TEAM_WORKER_LAUNCH_MODE = 'interactive';
+          process.env.OMX_TEAM_WORKER_CLI = 'codex';
+          process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS = '500';
+
           await assert.rejects(
             () => withoutTeamWorkerEnv(() =>
               startTeam(
-                'team-no-startup-evidence',
-                'interactive startup should fail without claim evidence',
+                'team-dead-startup-pane',
+                'dead pane should still fail startup',
                 'executor',
                 1,
                 [{ subject: 's', description: 'd', owner: 'worker-1' }],
                 cwd,
               )),
-            /worker_notify_failed:worker-1/,
+            /Worker worker-1 did not become ready/,
+          );
+        },
+      );
+    } finally {
+      if (typeof previousTmux === 'string') process.env.TMUX = previousTmux;
+      else delete process.env.TMUX;
+      if (typeof previousTmuxPane === 'string') process.env.TMUX_PANE = previousTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof previousLaunchMode === 'string') process.env.OMX_TEAM_WORKER_LAUNCH_MODE = previousLaunchMode;
+      else delete process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
+      if (typeof previousWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = previousWorkerCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      if (typeof previousStartupEvidenceTimeout === 'string') {
+        process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS = previousStartupEvidenceTimeout;
+      } else {
+        delete process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS;
+      }
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('startTeam materializes all worker identity/inbox files before worker-1 startup evidence can block later workers', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-materialize-before-evidence-'));
+    const previousTmux = process.env.TMUX;
+    const previousTmuxPane = process.env.TMUX_PANE;
+    const previousLaunchMode = process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
+    const previousWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
+    const previousSkipReadyWait = process.env.OMX_TEAM_SKIP_READY_WAIT;
+    const previousStartupEvidenceTimeout = process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS;
+
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-materialize-before-evidence-bin-',
+          tmuxScript: (tmuxLogPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      *"#{window_width}"*)
+        echo "120"
+        ;;
+      *)
+        echo "leader:0 %1"
+        ;;
+    esac
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"#{pane_dead} #{pane_pid}"*)
+        echo "0 4242"
+        ;;
+      *"pane_current_command"*)
+        printf "%%1\\tnode\\t'codex'\\n"
+        ;;
+      *"-t %2"*"#{pane_pid}"*)
+        echo "4242"
+        ;;
+      *"-t %3"*"#{pane_pid}"*)
+        echo "4343"
+        ;;
+      *"-t %4"*"#{pane_pid}"*)
+        echo "4444"
+        ;;
+      *"#{pane_pid}"*)
+        echo "4141"
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+  capture-pane)
+    exit 0
+    ;;
+  split-window)
+    count_file="${cwd}/split-window-count"
+    count=0
+    if [ -f "$count_file" ]; then
+      count=$(cat "$count_file")
+    fi
+    count=$((count + 1))
+    printf '%s' "$count" > "$count_file"
+    case "$count" in
+      1) echo "%2" ;;
+      2) echo "%3" ;;
+      3) echo "%4" ;;
+      *) echo "%5" ;;
+    esac
+    exit 0
+    ;;
+  set-hook|run-shell|select-layout|set-window-option|select-pane|send-keys|kill-pane|kill-session|resize-pane)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+          binaries: [
+            {
+              name: 'codex',
+              content: `#!/usr/bin/env node
+process.stdin.resume();
+setTimeout(() => process.exit(0), 30000);
+process.on('SIGTERM', () => process.exit(0));
+`,
+            },
+          ],
+        },
+        async () => {
+          const sanitizedTeamName = sanitizeTeamName('team-materialize-before-evidence');
+          delete process.env.TMUX;
+          process.env.TMUX_PANE = '%1';
+          process.env.OMX_TEAM_WORKER_LAUNCH_MODE = 'interactive';
+          process.env.OMX_TEAM_WORKER_CLI = 'codex';
+          process.env.OMX_TEAM_SKIP_READY_WAIT = '1';
+          process.env.OMX_TEAM_STARTUP_EVIDENCE_TIMEOUT_MS = '500';
+
+          const teamPromise = withoutTeamWorkerEnv(() =>
+            startTeam(
+              'team-materialize-before-evidence',
+              'later workers should materialize before startup evidence failure',
+              'executor',
+              2,
+              [
+                { subject: 'w1', description: 'worker one', owner: 'worker-1' },
+                { subject: 'w2', description: 'worker two', owner: 'worker-2' },
+              ],
+              cwd,
+            ));
+          const observedTeamPromise = teamPromise.then(
+            (runtime) => ({ ok: true as const, runtime }),
+            (error: unknown) => ({ ok: false as const, error }),
           );
 
+          const workerOneIdentity = join(cwd, '.omx', 'state', 'team', sanitizedTeamName, 'workers', 'worker-1', 'identity.json');
+          const workerTwoIdentity = join(cwd, '.omx', 'state', 'team', sanitizedTeamName, 'workers', 'worker-2', 'identity.json');
+          const workerTwoInbox = join(cwd, '.omx', 'state', 'team', sanitizedTeamName, 'workers', 'worker-2', 'inbox.md');
+
+          let materializedAllWorkers = false;
+          for (let attempt = 0; attempt < 450; attempt += 1) {
+            if (
+              existsSync(workerOneIdentity)
+              && existsSync(workerTwoIdentity)
+              && existsSync(workerTwoInbox)
+            ) {
+              materializedAllWorkers = true;
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+
           assert.equal(
-            existsSync(join(cwd, '.omx', 'state', 'team', 'team-no-startup-evidence')),
-            false,
+            materializedAllWorkers,
+            true,
+            'worker-2 durable state should exist before worker-1 startup evidence failure rejects launch',
           );
+
+          const outcome = await observedTeamPromise;
+          assert.equal(outcome.ok, false);
+          assert.match(String((outcome as { ok: false; error: Error }).error), /worker_notify_failed:worker-1/);
+
           assert.equal(
-            existsSync(join(cwd, '.omx', 'team', 'team-no-startup-evidence')),
+            existsSync(join(cwd, '.omx', 'state', 'team', sanitizedTeamName)),
             false,
           );
         },
@@ -1528,20 +1818,15 @@ sleep 5
     }
   });
 
-  it('startTeam preserves explicit codex launch args while forcing bypass in prompt mode', async () => {
+  it('startTeam rejects codex prompt mode even when explicit launch args are provided', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-codex-explicit-launch-'));
     const binDir = join(cwd, 'bin');
     const fakeCodexPath = join(binDir, 'codex');
-    const capturePath = join(cwd, 'codex-argv.json');
     await mkdir(binDir, { recursive: true });
     await writeFile(
       fakeCodexPath,
       `#!/usr/bin/env node
-const fs = require('fs');
-fs.writeFileSync(process.env.OMX_CODEX_ARGV_CAPTURE_PATH, JSON.stringify(process.argv.slice(2), null, 2));
-process.stdin.resume();
-setTimeout(() => process.exit(0), 5000);
-process.on('SIGTERM', () => process.exit(0));
+process.exit(0);
 `,
       { mode: 0o755 },
     );
@@ -1551,53 +1836,27 @@ process.on('SIGTERM', () => process.exit(0));
     const prevLaunchMode = process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
     const prevWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
     const prevLaunchArgs = process.env.OMX_TEAM_WORKER_LAUNCH_ARGS;
-    const prevCapture = process.env.OMX_CODEX_ARGV_CAPTURE_PATH;
 
     process.env.PATH = `${binDir}:${prevPath ?? ''}`;
     delete process.env.TMUX;
     process.env.OMX_TEAM_WORKER_LAUNCH_MODE = 'prompt';
     process.env.OMX_TEAM_WORKER_CLI = 'codex';
     process.env.OMX_TEAM_WORKER_LAUNCH_ARGS = '--model gpt-5.3-codex-spark -c model_reasoning_effort="low"';
-    process.env.OMX_CODEX_ARGV_CAPTURE_PATH = capturePath;
-
-    let runtime: TeamRuntime | null = null;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-codex-explicit-launch',
-          'codex prompt-mode team bootstrap',
-          'explore',
-          1,
-          [{ subject: 's', description: 'd', owner: 'worker-1' }],
-          cwd,
-        ));
-
-      assert.equal(runtime.config.worker_launch_mode, 'prompt');
-      assert.equal((runtime.config.workers[0]?.pid ?? 0) > 0, true);
-
-      let argv: string[] | null = null;
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        if (existsSync(capturePath)) {
-          argv = JSON.parse(await readFile(capturePath, 'utf-8')) as string[];
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      assert.ok(argv, 'codex argv capture file should be written');
-      assert.equal(argv.includes('--dangerously-bypass-approvals-and-sandbox'), false);
-      assert.equal(argv.filter((arg) => arg === '--dangerously-bypass-approvals-and-sandbox').length, 0);
-      assert.equal(argv.includes('--model'), true);
-      assert.equal(argv[argv.indexOf('--model') + 1], 'gpt-5.3-codex-spark');
-      assert.equal(argv.includes('-c'), true);
-      assert.equal(argv.includes('model_reasoning_effort="low"'), true);
-      assert.equal(argv.some((arg) => arg.includes('model_instructions_file=')), true);
-
-      await shutdownTeam(runtime.teamName, cwd, { force: true });
-      runtime = null;
+      await assert.rejects(
+        () => withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-codex-explicit-launch',
+            'codex prompt-mode team bootstrap',
+            'explore',
+            1,
+            [{ subject: 's', description: 'd', owner: 'worker-1' }],
+            cwd,
+          )),
+        /prompt_mode_codex_requires_tty/,
+      );
+      assert.equal(existsSync(join(cwd, '.omx', 'state', 'team', 'team-codex-explicit-launch')), false);
     } finally {
-      if (runtime) {
-        await shutdownTeam(runtime.teamName, cwd, { force: true }).catch(() => {});
-      }
       if (typeof prevPath === 'string') process.env.PATH = prevPath;
       else delete process.env.PATH;
       if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;
@@ -1608,8 +1867,6 @@ process.on('SIGTERM', () => process.exit(0));
       else delete process.env.OMX_TEAM_WORKER_CLI;
       if (typeof prevLaunchArgs === 'string') process.env.OMX_TEAM_WORKER_LAUNCH_ARGS = prevLaunchArgs;
       else delete process.env.OMX_TEAM_WORKER_LAUNCH_ARGS;
-      if (typeof prevCapture === 'string') process.env.OMX_CODEX_ARGV_CAPTURE_PATH = prevCapture;
-      else delete process.env.OMX_CODEX_ARGV_CAPTURE_PATH;
       await rm(cwd, { recursive: true, force: true });
     }
   });
@@ -1831,7 +2088,7 @@ process.on('SIGTERM', () => process.exit(0));
     }
   });
 
-  it('startTeam supports prompt launch mode without tmux and pipes trigger text via stdin', async () => {
+  it('startTeam rejects codex prompt mode without tmux with an explicit non-tty error', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-prompt-'));
     const binDir = join(cwd, 'bin');
     const fakeCodexPath = join(binDir, 'codex');
@@ -1856,28 +2113,21 @@ process.on('SIGTERM', () => process.exit(0));
     process.env.OMX_TEAM_WORKER_LAUNCH_MODE = 'prompt';
     process.env.OMX_TEAM_WORKER_CLI = 'codex';
 
-    let runtime: TeamRuntime | null = null;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-prompt',
-          'prompt-mode team bootstrap',
-          'executor',
-          1,
-          [{ subject: 's', description: 'd', owner: 'worker-1' }],
-          cwd,
-        ));
-
-      assert.equal(runtime.config.worker_launch_mode, 'prompt');
-      assert.equal(runtime.config.leader_pane_id, null);
-      assert.equal((runtime.config.workers[0]?.pid ?? 0) > 0, true);
-
-      await shutdownTeam(runtime.teamName, cwd, { force: true });
-      runtime = null;
+      await assert.rejects(
+        () => withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-prompt',
+            'prompt-mode team bootstrap',
+            'executor',
+            1,
+            [{ subject: 's', description: 'd', owner: 'worker-1' }],
+            cwd,
+          )),
+        /prompt_mode_codex_requires_tty/,
+      );
+      assert.equal(existsSync(join(cwd, '.omx', 'state', 'team', 'team-prompt')), false);
     } finally {
-      if (runtime) {
-        await shutdownTeam(runtime.teamName, cwd, { force: true }).catch(() => {});
-      }
       if (typeof prevPath === 'string') process.env.PATH = prevPath;
       else delete process.env.PATH;
       if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;

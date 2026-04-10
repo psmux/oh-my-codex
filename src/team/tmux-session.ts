@@ -1588,6 +1588,19 @@ export function isWorkerAlive(sessionName: string, workerIndex: number, workerPa
   }
 }
 
+export function isWorkerPaneOpen(sessionName: string, workerIndex: number, workerPaneId?: string): boolean {
+  const result = runTmux([
+    'list-panes',
+    '-t', paneTarget(sessionName, workerIndex, workerPaneId),
+    '-F',
+    '#{pane_dead}',
+  ]);
+  if (!result.ok) return false;
+  const line = result.stdout.split('\n')[0]?.trim();
+  if (!line) return false;
+  return line !== '1';
+}
+
 // Kill a specific worker: send C-c, then C-d, then kill-pane if still alive.
 // leaderPaneId: when provided, the kill is skipped entirely if workerPaneId matches it.
 export async function killWorker(sessionName: string, workerIndex: number, workerPaneId?: string, leaderPaneId?: string): Promise<void> {

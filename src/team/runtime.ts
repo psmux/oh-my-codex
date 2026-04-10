@@ -21,6 +21,7 @@ import {
   sendToWorker,
   sendToWorkerStdin,
   isWorkerAlive,
+  isWorkerPaneOpen,
   getWorkerPanePid,
   killWorkerByPaneIdAsync,
   restoreStandaloneHudPane,
@@ -64,6 +65,7 @@ import {
   teamWriteMonitorSnapshot as writeMonitorSnapshot,
   teamReadPhase as readTeamPhaseState,
   teamWritePhase as writeTeamPhaseState,
+  teamWriteWorkerStatus as writeWorkerStatus,
   type TeamConfig,
   type WorkerInfo,
   type WorkerHeartbeat,
@@ -1223,9 +1225,18 @@ const previousModelInstructionsFileByTeam = new Map<string, string | undefined>(
 const PROMPT_WORKER_SIGTERM_WAIT_MS = 3_000;
 const PROMPT_WORKER_SIGKILL_WAIT_MS = 2_000;
 const PROMPT_WORKER_EXIT_POLL_MS = 100;
+const PROMPT_MODE_CODEX_UNSUPPORTED_REASON = 'prompt_mode_codex_requires_tty';
 
 function resolveInstructionStateRoot(worktreePath?: string | null): string | undefined {
   return worktreePath ? WORKTREE_TRIGGER_STATE_ROOT : undefined;
+}
+
+function assertPromptModeWorkerCliSupported(workerCliPlan: readonly TeamWorkerCli[]): void {
+  if (workerCliPlan.some((workerCli) => workerCli === 'codex')) {
+    throw new Error(
+      `${PROMPT_MODE_CODEX_UNSUPPORTED_REASON}: Codex prompt workers require a terminal; use interactive team mode or set OMX_TEAM_WORKER_CLI=claude/gemini for prompt-mode teammates.`,
+    );
+  }
 }
 
 function resolveWorkerReadyTimeoutMs(env: NodeJS.ProcessEnv): number {
@@ -1352,6 +1363,47 @@ export async function waitForClaudeStartupEvidence(params: {
 
 function shouldSkipWorkerReadyWait(env: NodeJS.ProcessEnv): boolean {
   return env.OMX_TEAM_SKIP_READY_WAIT === '1';
+}
+
+function isRecoverableInteractiveStartupReason(reason: string): boolean {
+  const normalized = reason.trim().toLowerCase();
+  return normalized.includes('startup_no_evidence')
+    || normalized.includes('fallback_attempted_but_unconfirmed')
+    || normalized.includes('ready_prompt_timeout');
+}
+
+async function recordRecoverableStartupIssue(params: {
+  teamName: string;
+  workerName: string;
+  taskIds: string[];
+  reason: string;
+  cwd: string;
+}): Promise<void> {
+  const { teamName, workerName, taskIds, reason, cwd } = params;
+  const updatedAt = new Date().toISOString();
+  await writeWorkerStatus(
+    teamName,
+    workerName,
+    {
+      state: 'unknown',
+      current_task_id: taskIds[0],
+      reason,
+      updated_at: updatedAt,
+    },
+    cwd,
+  ).catch(() => {});
+  await appendTeamEvent(
+    teamName,
+    {
+      type: 'worker_state_changed',
+      worker: workerName,
+      state: 'unknown',
+      prev_state: 'unknown',
+      task_id: taskIds[0],
+      reason,
+    },
+    cwd,
+  ).catch(() => {});
 }
 
 function setTeamModelInstructionsFile(teamName: string, filePath: string): void {
@@ -1895,6 +1947,9 @@ export async function startTeam(
     fallbackModel: resolveAgentDefaultModel(agentType, process.env.CODEX_HOME),
   });
   const workerCliPlan = resolveTeamWorkerCliPlan(workerCount, sharedWorkerLaunchArgs, process.env);
+  if (workerLaunchMode === 'prompt') {
+    assertPromptModeWorkerCliSupported(workerCliPlan);
+  }
   const workerReadyTimeoutMs = resolveWorkerReadyTimeoutMs(process.env);
   const workerStartupEvidenceTimeoutMs = resolveWorkerStartupEvidenceTimeoutMs(
     process.env,
@@ -2067,6 +2122,55 @@ export async function startTeam(
 
     const workerPaneIds = Array.from({ length: workerCount }, () => undefined as string | undefined);
 
+    const materializeWorkerStartupState = async (
+      bootstrapPlan: typeof workerBootstrapPlans[number],
+      workerIndex: number,
+      paneId: string | undefined,
+    ): Promise<void> => {
+      const workerWorkspace = bootstrapPlan.workerWorkspace;
+      const identity: WorkerInfo = {
+        name: bootstrapPlan.workerName,
+        index: workerIndex,
+        role: bootstrapPlan.workerRole,
+        worker_cli: bootstrapPlan.workerCli,
+        assigned_tasks: bootstrapPlan.workerTasks.map((task) => task.id),
+        working_dir: workerWorkspace.cwd,
+        worktree_repo_root: workerWorkspace.worktreeRepoRoot,
+        worktree_path: workerWorkspace.worktreePath,
+        worktree_branch: workerWorkspace.worktreeBranch,
+        worktree_detached: workerWorkspace.worktreeDetached,
+        worktree_created: workerWorkspace.worktreeCreated,
+        team_state_root: teamStateRoot,
+      };
+
+      if (workerLaunchMode === 'interactive') {
+        const panePid = getWorkerPanePid(sessionName, workerIndex, paneId);
+        if (panePid) identity.pid = panePid;
+      } else if (config?.workers[workerIndex - 1]?.pid) {
+        identity.pid = config.workers[workerIndex - 1].pid;
+      }
+
+      if (paneId) identity.pane_id = paneId;
+
+      if (config?.workers[workerIndex - 1]) {
+        config.workers[workerIndex - 1].pid = identity.pid;
+        config.workers[workerIndex - 1].pane_id = paneId;
+        config.workers[workerIndex - 1].role = bootstrapPlan.workerRole;
+        config.workers[workerIndex - 1].worker_cli = bootstrapPlan.workerCli;
+        config.workers[workerIndex - 1].assigned_tasks = bootstrapPlan.workerTasks.map((task) => task.id);
+        config.workers[workerIndex - 1].working_dir = workerWorkspace.cwd;
+        config.workers[workerIndex - 1].worktree_repo_root = workerWorkspace.worktreeRepoRoot;
+        config.workers[workerIndex - 1].worktree_path = workerWorkspace.worktreePath;
+        config.workers[workerIndex - 1].worktree_branch = workerWorkspace.worktreeBranch;
+        config.workers[workerIndex - 1].worktree_detached = workerWorkspace.worktreeDetached;
+        config.workers[workerIndex - 1].worktree_created = workerWorkspace.worktreeCreated;
+        config.workers[workerIndex - 1].team_state_root = teamStateRoot;
+      }
+
+      await writeWorkerIdentity(sanitized, bootstrapPlan.workerName, identity, leaderCwd);
+      await writeWorkerInbox(sanitized, bootstrapPlan.workerName, bootstrapPlan.inbox, leaderCwd);
+    };
+
     // 6. Create worker runtime (interactive tmux panes or prompt-mode child processes)
     if (workerLaunchMode === 'interactive') {
       const createdSession = createTeamSession(sanitized, workerCount, leaderCwd, sharedWorkerLaunchArgs, workerStartups);
@@ -2100,6 +2204,16 @@ export async function startTeam(
         }
       }
     }
+
+    // Materialize durable startup state for every worker before any per-worker
+    // readiness wait or startup-evidence gate can block later workers.
+    for (let i = 1; i <= workerCount; i++) {
+      const bootstrapPlan = workerBootstrapPlans[i - 1];
+      if (!bootstrapPlan) {
+        throw new Error(`missing bootstrap plan for worker-${i}`);
+      }
+      await materializeWorkerStartupState(bootstrapPlan, i, workerPaneIds[i - 1]);
+    }
     await saveTeamConfig(config, leaderCwd);
 
     // 7. Wait for all workers to be ready (interactive mode), then bootstrap them
@@ -2110,66 +2224,35 @@ export async function startTeam(
       if (!bootstrapPlan) {
         throw new Error(`missing bootstrap plan for worker-${i}`);
       }
-      const { workerName, paneId, workerTasks, workerRole, inbox, trigger, triggerIntent, initialPrompt } = {
+      const { workerName, paneId, workerTasks, inbox, trigger, triggerIntent, initialPrompt } = {
         workerName: bootstrapPlan.workerName,
         paneId: workerPaneIds[i - 1],
         workerTasks: bootstrapPlan.workerTasks,
-        workerRole: bootstrapPlan.workerRole,
         inbox: bootstrapPlan.inbox,
         trigger: bootstrapPlan.trigger,
         triggerIntent: bootstrapPlan.triggerIntent,
         initialPrompt: bootstrapPlan.initialPrompt,
       };
-      const workerWorkspace = bootstrapPlan.workerWorkspace;
 
       if (workerTasks.map(t => t.role).filter(Boolean).length > 0 && new Set(workerTasks.map(t => t.role).filter(Boolean)).size > 1) {
         console.log(`[omx:team] ${workerName}: mixed task roles [${[...new Set(workerTasks.map(t => t.role).filter(Boolean))].join(', ')}], falling back to ${agentType}`);
       }
 
-      // Write worker identity
-      const identity: WorkerInfo = {
-        name: workerName,
-        index: i,
-        role: workerRole,
-        worker_cli: workerCliPlan[i - 1],
-        assigned_tasks: workerTasks.map(t => t.id),
-        working_dir: workerWorkspace.cwd,
-        worktree_repo_root: workerWorkspace.worktreeRepoRoot,
-        worktree_path: workerWorkspace.worktreePath,
-        worktree_branch: workerWorkspace.worktreeBranch,
-        worktree_detached: workerWorkspace.worktreeDetached,
-        worktree_created: workerWorkspace.worktreeCreated,
-        team_state_root: teamStateRoot,
-      };
-
-      // Get pane PID and store it (interactive mode) or process PID (prompt mode)
-      if (workerLaunchMode === 'interactive') {
-        const panePid = getWorkerPanePid(sessionName, i, paneId);
-        if (panePid) identity.pid = panePid;
-      } else if (config.workers[i - 1]?.pid) {
-        identity.pid = config.workers[i - 1].pid;
-      }
-      if (paneId) identity.pane_id = paneId;
-      if (config.workers[i - 1]) {
-        config.workers[i - 1].pid = identity.pid;
-        config.workers[i - 1].pane_id = paneId;
-        config.workers[i - 1].role = workerRole;
-        config.workers[i - 1].worker_cli = workerCliPlan[i - 1];
-        config.workers[i - 1].working_dir = workerWorkspace.cwd;
-        config.workers[i - 1].worktree_repo_root = workerWorkspace.worktreeRepoRoot;
-        config.workers[i - 1].worktree_path = workerWorkspace.worktreePath;
-        config.workers[i - 1].worktree_branch = workerWorkspace.worktreeBranch;
-        config.workers[i - 1].worktree_detached = workerWorkspace.worktreeDetached;
-        config.workers[i - 1].worktree_created = workerWorkspace.worktreeCreated;
-        config.workers[i - 1].team_state_root = teamStateRoot;
-      }
-
-      await writeWorkerIdentity(sanitized, workerName, identity, leaderCwd);
-
       // Wait for worker readiness
       if (workerLaunchMode === 'interactive' && !skipWorkerReadyWait && !initialPrompt) {
         const ready = waitForWorkerReady(sessionName, i, workerReadyTimeoutMs, paneId);
         if (!ready) {
+          const workerAlive = isWorkerPaneOpen(sessionName, i, paneId);
+          if (workerAlive) {
+            await recordRecoverableStartupIssue({
+              teamName: sanitized,
+              workerName,
+              taskIds: workerTasks.map((task) => task.id),
+              reason: 'ready_prompt_timeout',
+              cwd: leaderCwd,
+            });
+            continue;
+          }
           throw new Error(`Worker ${workerName} did not become ready in tmux session ${sessionName}`);
         }
       }
@@ -2213,10 +2296,27 @@ export async function startTeam(
               sleepFractionalSeconds(startupRetryDelayS);
             }
           }
-        }
+      }
       }
       if (!dispatchOutcome.ok) {
-        throw new Error(`worker_notify_failed:${workerName}`);
+        const workerAlive = workerLaunchMode === 'prompt'
+          ? isPromptWorkerAlive(config, config.workers[i - 1]!)
+          : isWorkerPaneOpen(sessionName, i, paneId);
+        if (
+          workerLaunchMode === 'interactive'
+          && workerAlive
+          && isRecoverableInteractiveStartupReason(dispatchOutcome.reason)
+        ) {
+          await recordRecoverableStartupIssue({
+            teamName: sanitized,
+            workerName,
+            taskIds: workerTasks.map((task) => task.id),
+            reason: dispatchOutcome.reason,
+            cwd: leaderCwd,
+          });
+          continue;
+        }
+        throw new Error(`worker_notify_failed:${workerName}:${dispatchOutcome.reason}`);
       }
     }
     await saveTeamConfig(config, leaderCwd);

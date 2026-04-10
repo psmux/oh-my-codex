@@ -1381,6 +1381,41 @@ esac
     }
   });
 
+  it("blocks Stop from session-scoped team mode when session.json points to another session", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-team-session-mismatch-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      await mkdir(join(stateDir, "sessions", "sess-live-team"), { recursive: true });
+      await writeJson(join(stateDir, "session.json"), { session_id: "sess-other-team" });
+      await writeJson(join(stateDir, "sessions", "sess-live-team", "team-state.json"), {
+        active: true,
+        mode: "team",
+        current_phase: "team-exec",
+        team_name: "session-live-team",
+      });
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "sess-live-team",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.deepEqual(result.outputJson, {
+        decision: "block",
+        reason:
+          `OMX team pipeline is still active (session-live-team) at phase team-exec; continue coordinating until the team reaches a terminal phase.${TEAM_STOP_COMMIT_GUIDANCE}`,
+        stopReason: "team_team-exec",
+        systemMessage: "OMX team pipeline is still active at phase team-exec.",
+      });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("returns Stop continuation output for active ralplan skill with matching active mode state and without active subagents", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-skill-"));
     try {
@@ -1624,6 +1659,41 @@ esac
           hook_event_name: "Stop",
           cwd,
           session_id: "sess-stop",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.deepEqual(result.outputJson, {
+        decision: "block",
+        reason:
+          "OMX Ralph is still active (phase: executing); continue the task and gather fresh verification evidence before stopping.",
+        stopReason: "ralph_executing",
+        systemMessage:
+          "OMX Ralph is still active (phase: executing); continue the task and gather fresh verification evidence before stopping.",
+      });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks Stop from session-scoped Ralph state when session.json points to another session", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-ralph-session-mismatch-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      await mkdir(join(stateDir, "sessions", "sess-live-ralph"), { recursive: true });
+      await writeJson(join(stateDir, "session.json"), { session_id: "sess-other-ralph" });
+      await writeJson(join(stateDir, "sessions", "sess-live-ralph", "ralph-state.json"), {
+        active: true,
+        current_phase: "executing",
+        session_id: "sess-live-ralph",
+      });
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "sess-live-ralph",
         },
         { cwd },
       );

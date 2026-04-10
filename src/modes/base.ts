@@ -147,6 +147,10 @@ export async function startMode(
  */
 export async function readModeState(mode: string, projectRoot?: string): Promise<ModeState | null> {
   const paths = await getReadScopedStatePaths(mode, projectRoot);
+  return readModeStateFromPaths(paths);
+}
+
+async function readModeStateFromPaths(paths: string[]): Promise<ModeState | null> {
   for (const path of paths) {
     if (!existsSync(path)) continue;
     try {
@@ -158,17 +162,34 @@ export async function readModeState(mode: string, projectRoot?: string): Promise
   return null;
 }
 
+export async function readModeStateForSession(
+  mode: string,
+  sessionId: string | undefined,
+  projectRoot?: string,
+): Promise<ModeState | null> {
+  let paths: string[];
+  try {
+    paths = await getReadScopedStatePaths(mode, projectRoot, sessionId);
+  } catch {
+    return null;
+  }
+  return readModeStateFromPaths(paths);
+}
+
 /**
  * Update mode state (merge fields)
  */
 export async function updateModeState(
   mode: string,
   updates: Partial<ModeState>,
-  projectRoot?: string
+  projectRoot?: string,
+  explicitSessionId?: string,
 ): Promise<ModeState> {
-  const current = await readModeState(mode, projectRoot);
+  const current = explicitSessionId
+    ? await readModeStateForSession(mode, explicitSessionId, projectRoot)
+    : await readModeState(mode, projectRoot);
   if (!current) throw new Error(`Mode ${mode} not found`);
-  const scope = await resolveStateScope(projectRoot);
+  const scope = await resolveStateScope(projectRoot, explicitSessionId);
   await mkdir(scope.stateDir, { recursive: true });
 
   const updatedBase = { ...current, ...updates };

@@ -2,7 +2,7 @@ import { execFileSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { mkdir, readFile, readdir, writeFile } from "fs/promises";
 import { join, resolve } from "path";
-import { readModeState, updateModeState } from "../modes/base.js";
+import { readModeState, readModeStateForSession, updateModeState } from "../modes/base.js";
 import {
   listActiveSkills,
   readVisibleSkillActiveState,
@@ -176,12 +176,20 @@ function formatPhase(value: unknown, fallback = "active"): string {
   return phase || fallback;
 }
 
-async function readActiveRalphState(stateDir: string): Promise<Record<string, unknown> | null> {
+async function readActiveRalphState(
+  stateDir: string,
+  preferredSessionId?: string,
+): Promise<Record<string, unknown> | null> {
   const sessionInfo = await readJsonIfExists(join(stateDir, "session.json"));
   const currentOmxSessionId = safeString(sessionInfo?.session_id).trim();
-  if (currentOmxSessionId) {
+  const sessionCandidates = [...new Set([
+    safeString(preferredSessionId).trim(),
+    currentOmxSessionId,
+  ].filter(Boolean))];
+
+  for (const sessionId of sessionCandidates) {
     const sessionScoped = await readJsonIfExists(
-      join(stateDir, "sessions", currentOmxSessionId, "ralph-state.json"),
+      join(stateDir, "sessions", sessionId, "ralph-state.json"),
     );
     if (
       sessionScoped?.active === true
@@ -198,7 +206,7 @@ async function readActiveRalphState(stateDir: string): Promise<Record<string, un
     return direct;
   }
 
-  if (currentOmxSessionId) return null;
+  if (sessionCandidates.length > 0) return null;
 
   const sessionsRoot = join(stateDir, "sessions");
   if (!existsSync(sessionsRoot)) return null;
@@ -614,8 +622,11 @@ function isStopExempt(payload: CodexHookPayload): boolean {
 async function buildModeBasedStopOutput(
   mode: "autopilot" | "ultrawork" | "ultraqa",
   cwd: string,
+  sessionId?: string,
 ): Promise<Record<string, unknown> | null> {
-  const state = await readModeState(mode, cwd);
+  const state = sessionId
+    ? await readModeStateForSession(mode, sessionId, cwd)
+    : await readModeState(mode, cwd);
   if (state?.active !== true || !isNonTerminalPhase(state.current_phase)) return null;
   const phase = formatPhase(state.current_phase);
   return {
@@ -626,8 +637,10 @@ async function buildModeBasedStopOutput(
   };
 }
 
-async function buildTeamStopOutput(cwd: string): Promise<Record<string, unknown> | null> {
-  const teamState = await readModeState("team", cwd);
+async function buildTeamStopOutput(cwd: string, sessionId?: string): Promise<Record<string, unknown> | null> {
+  const teamState = sessionId
+    ? await readModeStateForSession("team", sessionId, cwd)
+    : await readModeState("team", cwd);
   if (teamState?.active !== true) return null;
   const teamName = safeString(teamState.team_name).trim();
   const coarsePhase = teamState.current_phase;
@@ -907,7 +920,7 @@ async function findActiveTeamForTransportFailure(
   cwd: string,
   sessionId: string,
 ): Promise<{ teamName: string; phase: string } | null> {
-  const teamState = await readModeState("team", cwd);
+  const teamState = await readModeStateForSession("team", sessionId, cwd);
   if (teamState?.active === true) {
     const teamName = safeString(teamState.team_name).trim();
     const coarsePhase = formatPhase(teamState.current_phase);
@@ -1001,6 +1014,7 @@ async function markTeamTransportFailure(
         last_turn_at: nowIso,
       },
       cwd,
+      sessionId || undefined,
     );
   } catch {
     // Canonical team state already carries the preserved failure for coarse-state-missing sessions.
@@ -1018,22 +1032,22 @@ async function buildStopHookOutput(
 
   const sessionId = readPayloadSessionId(payload);
   const threadId = readPayloadThreadId(payload);
-  const ralphState = await readActiveRalphState(stateDir);
+  const ralphState = await readActiveRalphState(stateDir, sessionId);
   const stopHookActive = payload.stop_hook_active === true || payload.stopHookActive === true;
   if (!ralphState) {
     const teamWorkerOutput = await buildTeamWorkerStopOutput(cwd);
     if (!stopHookActive && hasTeamWorkerContext()) return teamWorkerOutput;
 
-    const autopilotOutput = await buildModeBasedStopOutput("autopilot", cwd);
+    const autopilotOutput = await buildModeBasedStopOutput("autopilot", cwd, sessionId);
     if (!stopHookActive && autopilotOutput) return autopilotOutput;
 
-    const ultraworkOutput = await buildModeBasedStopOutput("ultrawork", cwd);
+    const ultraworkOutput = await buildModeBasedStopOutput("ultrawork", cwd, sessionId);
     if (!stopHookActive && ultraworkOutput) return ultraworkOutput;
 
-    const ultraqaOutput = await buildModeBasedStopOutput("ultraqa", cwd);
+    const ultraqaOutput = await buildModeBasedStopOutput("ultraqa", cwd, sessionId);
     if (!stopHookActive && ultraqaOutput) return ultraqaOutput;
 
-    const teamOutput = await buildTeamStopOutput(cwd);
+    const teamOutput = await buildTeamStopOutput(cwd, sessionId);
     if (teamOutput) {
       const teamSignature = buildRepeatableStopSignature(payload, "team-stop", safeString(teamOutput.stopReason));
       return await maybeReturnRepeatableStopOutput(payload, stateDir, teamSignature, teamOutput);
