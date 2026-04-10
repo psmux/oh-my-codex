@@ -1728,7 +1728,26 @@ exit 0
     );
     assert.deepEqual(
       steps.map((step) => step.name),
-      ["set-mouse", "attach-session"],
+      ["set-mouse", "sanitize-copy-mode-style", "attach-session"],
+    );
+  });
+
+  it("buildDetachedSessionFinalizeSteps sanitizes copy-mode styling before attach when mouse mode is enabled", () => {
+    const steps = buildDetachedSessionFinalizeSteps(
+      "omx-demo",
+      "%12",
+      "3",
+      true,
+    );
+    assert.equal(
+      steps.findIndex((step) => step.name === "sanitize-copy-mode-style")
+      > steps.findIndex((step) => step.name === "set-mouse"),
+      true,
+    );
+    assert.equal(
+      steps.findIndex((step) => step.name === "attach-session")
+      > steps.findIndex((step) => step.name === "sanitize-copy-mode-style"),
+      true,
     );
   });
 

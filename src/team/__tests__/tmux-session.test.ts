@@ -48,6 +48,7 @@ import {
   waitForWorkerReady,
   paneIsBootstrapping,
   dismissTrustPromptIfPresent,
+  mitigateCopyModeUnderlineArtifacts,
 } from '../tmux-session.js';
 import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_TEAM_HEIGHT_LINES } from '../../hud/constants.js';
 import * as tmuxSessionModule from '../tmux-session.js';
@@ -2704,6 +2705,13 @@ describe('enableMouseScrolling session scoping (issue #817)', () => {
       (tmuxLogPath) => `#!/bin/sh
 printf '%s\n' "$*" >> "${tmuxLogPath}"
 case "$1" in
+  show-options)
+    if [ "$2" = "-gv" ] && [ "$3" = "-t" ] && [ "$4" = "omx-team-x" ] && [ "$5" = "mode-style" ]; then
+      printf '%s\n' 'bg=yellow,fg=black,underscore'
+      exit 0
+    fi
+    exit 1
+    ;;
   set-option)
     if [ "$2" = "-t" ]; then
       exit 0
@@ -2720,8 +2728,58 @@ esac
         const tmuxLog = await readFile(logPath, 'utf-8');
         assert.match(tmuxLog, /set-option -t omx-team-x mouse on/);
         assert.match(tmuxLog, /set-option -t omx-team-x set-clipboard on/);
+        assert.match(
+          tmuxLog,
+          /set-option -t omx-team-x mode-style bg=yellow,fg=black,underscore,nounderscore,nodouble-underscore,nocurly-underscore,nodotted-underscore,nodashed-underscore/,
+        );
         assert.doesNotMatch(tmuxLog, /bind-key/);
         assert.doesNotMatch(tmuxLog, /terminal-overrides/);
+      },
+    );
+  });
+});
+
+describe('mitigateCopyModeUnderlineArtifacts', () => {
+  it('best-effort sanitizes copy-mode style options without requiring global tmux changes', async () => {
+    await withMockTmuxFixture(
+      'omx-tmux-sanitize-copy-style-',
+      (tmuxLogPath) => `#!/bin/sh
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  show-options)
+    if [ "$2" = "-gv" ] && [ "$3" = "-t" ] && [ "$4" = "omx-team-x" ] && [ "$5" = "mode-style" ]; then
+      printf '%s\n' 'bg=yellow,fg=black,underscore'
+      exit 0
+    fi
+    if [ "$2" = "-gv" ] && [ "$3" = "-t" ] && [ "$4" = "omx-team-x" ] && [ "$5" = "copy-mode-selection-style" ]; then
+      printf '%s\n' 'fg=white,bg=blue,curly-underscore'
+      exit 0
+    fi
+    exit 1
+    ;;
+  set-option)
+    if [ "$2" = "-t" ]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+      async ({ logPath }) => {
+        assert.equal(mitigateCopyModeUnderlineArtifacts('omx-team-x'), true);
+        const tmuxLog = await readFile(logPath, 'utf-8');
+        assert.match(
+          tmuxLog,
+          /set-option -t omx-team-x mode-style bg=yellow,fg=black,underscore,nounderscore,nodouble-underscore,nocurly-underscore,nodotted-underscore,nodashed-underscore/,
+        );
+        assert.match(
+          tmuxLog,
+          /set-option -t omx-team-x copy-mode-selection-style fg=white,bg=blue,curly-underscore,nounderscore,nodouble-underscore,nocurly-underscore,nodotted-underscore,nodashed-underscore/,
+        );
+        assert.doesNotMatch(tmuxLog, /set-option -g/);
       },
     );
   });

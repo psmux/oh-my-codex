@@ -61,6 +61,17 @@ const GEMINI_APPROVAL_MODE_FLAG = '--approval-mode';
 const GEMINI_APPROVAL_MODE_YOLO = 'yolo';
 const OMX_LEADER_NODE_PATH_ENV = 'OMX_LEADER_NODE_PATH';
 const OMX_LEADER_CLI_PATH_ENV = 'OMX_LEADER_CLI_PATH';
+const TMUX_NO_UNDERLINE_STYLE_FLAGS = [
+  'nounderscore',
+  'nodouble-underscore',
+  'nocurly-underscore',
+  'nodotted-underscore',
+  'nodashed-underscore',
+] as const;
+const TMUX_COPY_MODE_STYLE_OPTIONS = [
+  'mode-style',
+  'copy-mode-selection-style',
+] as const;
 
 export type TeamWorkerCli = 'codex' | 'claude' | 'gemini';
 type TeamWorkerCliMode = 'auto' | TeamWorkerCli;
@@ -103,6 +114,45 @@ function runTmux(args: string[]): { ok: true; stdout: string } | { ok: false; st
     return { ok: false, stderr: (result.stderr || '').trim() || `tmux exited ${result.status}` };
   }
   return { ok: true, stdout: (result.stdout || '').trim() };
+}
+
+function appendNoUnderlineStyleFlags(style: string): string {
+  const normalized = style
+    .split(/[,\s]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+  const combined = [...normalized];
+  for (const flag of TMUX_NO_UNDERLINE_STYLE_FLAGS) {
+    if (!combined.includes(flag)) combined.push(flag);
+  }
+  return combined.join(',');
+}
+
+function sanitizeTmuxStyleOption(sessionTarget: string, optionName: string): boolean {
+  const shown = runTmux(['show-options', '-gv', '-t', sessionTarget, optionName]);
+  if (!shown.ok) return false;
+
+  const current = shown.stdout.trim();
+  if (current === '') return false;
+
+  const sanitized = appendNoUnderlineStyleFlags(current);
+  if (sanitized === current) return true;
+
+  const result = runTmux(['set-option', '-t', sessionTarget, optionName, sanitized]);
+  return result.ok;
+}
+
+export function mitigateCopyModeUnderlineArtifacts(sessionTarget: string): boolean {
+  const normalizedTarget = sessionTarget.trim();
+  if (normalizedTarget === '') return false;
+
+  let applied = false;
+  for (const optionName of TMUX_COPY_MODE_STYLE_OPTIONS) {
+    if (sanitizeTmuxStyleOption(normalizedTarget, optionName)) {
+      applied = true;
+    }
+  }
+  return applied;
 }
 
 export function hasCurrentTmuxClientContext(): boolean {
@@ -1144,6 +1194,10 @@ export function enableMouseScrolling(sessionTarget: string): boolean {
   // Enable OSC 52 so copy-selection-and-cancel propagates selected text to
   // the terminal's clipboard without requiring xclip or pbcopy. (closes #206)
   runTmux(['set-option', '-t', sessionTarget, 'set-clipboard', 'on']);
+
+  // Mouse selection enters tmux copy-mode. Keep the mitigation session-scoped
+  // so OMX does not mutate users' global tmux style defaults. (issue #1448)
+  mitigateCopyModeUnderlineArtifacts(sessionTarget);
 
   return true;
 }

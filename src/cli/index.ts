@@ -75,6 +75,7 @@ import {
   isMsysOrGitBash,
   isNativeWindows,
   isTmuxAvailable,
+  mitigateCopyModeUnderlineArtifacts,
 } from "../team/tmux-session.js";
 import { getPackageRoot } from "../utils/package.js";
 import { codexConfigPath, rememberOmxLaunchContext, resolveOmxEntryPath } from "../utils/paths.js";
@@ -1826,6 +1827,10 @@ export function buildDetachedSessionFinalizeSteps(
       name: "set-mouse",
       args: ["set-option", "-t", sessionName, "mouse", "on"],
     });
+    steps.push({
+      name: "sanitize-copy-mode-style",
+      args: [],
+    });
   }
   steps.push({
     name: "attach-session",
@@ -2425,6 +2430,14 @@ function runCodex(
             );
           }
           for (const finalizeStep of finalizeSteps) {
+            if (finalizeStep.name === "sanitize-copy-mode-style") {
+              try {
+                mitigateCopyModeUnderlineArtifacts(sessionName);
+              } catch (err) {
+                process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+              }
+              continue;
+            }
             const stdio =
               finalizeStep.name === "attach-session" ? "inherit" : "ignore";
             try {
