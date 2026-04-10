@@ -1226,13 +1226,18 @@ const PROMPT_WORKER_SIGTERM_WAIT_MS = 3_000;
 const PROMPT_WORKER_SIGKILL_WAIT_MS = 2_000;
 const PROMPT_WORKER_EXIT_POLL_MS = 100;
 const PROMPT_MODE_CODEX_UNSUPPORTED_REASON = 'prompt_mode_codex_requires_tty';
+// Test-only escape hatch for fake prompt workers that intentionally do not require a real TTY.
+const PROMPT_MODE_CODEX_TEST_ALLOW_ENV = 'OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT';
 
 function resolveInstructionStateRoot(worktreePath?: string | null): string | undefined {
   return worktreePath ? WORKTREE_TRIGGER_STATE_ROOT : undefined;
 }
 
 function assertPromptModeWorkerCliSupported(workerCliPlan: readonly TeamWorkerCli[]): void {
-  if (workerCliPlan.some((workerCli) => workerCli === 'codex')) {
+  if (
+    workerCliPlan.some((workerCli) => workerCli === 'codex')
+    && process.env[PROMPT_MODE_CODEX_TEST_ALLOW_ENV] !== '1'
+  ) {
     throw new Error(
       `${PROMPT_MODE_CODEX_UNSUPPORTED_REASON}: Codex prompt workers require a terminal; use interactive team mode or set OMX_TEAM_WORKER_CLI=claude/gemini for prompt-mode teammates.`,
     );

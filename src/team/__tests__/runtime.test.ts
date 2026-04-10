@@ -138,6 +138,26 @@ function withoutTeamWorkerEnv<T>(fn: () => T): T {
   }
 }
 
+function withMockPromptModeCodexAllowed<T>(fn: () => T): T {
+  const previous = process.env.OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT;
+  process.env.OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT = '1';
+  let restoreImmediately = true;
+  const restore = () => {
+    if (typeof previous === 'string') process.env.OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT = previous;
+    else delete process.env.OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT;
+  };
+  try {
+    const result = fn();
+    if (result instanceof Promise) {
+      restoreImmediately = false;
+      return result.finally(restore) as T;
+    }
+    return result;
+  } finally {
+    if (restoreImmediately) restore();
+  }
+}
+
 async function waitForFileText(
   filePath: string,
   matcher: (content: string) => boolean,
@@ -198,6 +218,7 @@ async function withPromptModeCodexEnv<T>(
     TMUX: undefined,
     OMX_TEAM_WORKER_LAUNCH_MODE: 'prompt',
     OMX_TEAM_WORKER_CLI: 'codex',
+    OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT: '1',
     ...extraEnv,
   };
 
@@ -1912,18 +1933,19 @@ process.on('SIGTERM', () => process.exit(0));
 
     let runtime: TeamRuntime | null = null;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-role-routing',
-          'heuristic routing handoff',
-          'executor',
-          2,
-          [
-            { subject: 'test routing report only', description: 'test routing report only', owner: 'worker-1', role: 'test-engineer' },
-            { subject: 'document routing report only', description: 'document routing report only', owner: 'worker-2', role: 'writer' },
-          ],
-          cwd,
-        ));
+      runtime = await withMockPromptModeCodexAllowed(() =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-role-routing',
+            'heuristic routing handoff',
+            'executor',
+            2,
+            [
+              { subject: 'test routing report only', description: 'test routing report only', owner: 'worker-1', role: 'test-engineer' },
+              { subject: 'document routing report only', description: 'document routing report only', owner: 'worker-2', role: 'writer' },
+            ],
+            cwd,
+          )));
 
       assert.equal(runtime.config.worker_launch_mode, 'prompt');
       assert.equal(runtime.config.workers[0]?.role, 'test-engineer');
@@ -2033,17 +2055,18 @@ process.on('SIGTERM', () => process.exit(0));
 
     let runtime: TeamRuntime | null = null;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-mini-tuned-routing',
-          'mini tuned routing handoff',
-          'executor',
-          1,
-          [
-            { subject: 'document routing report only', description: 'document routing report only', owner: 'worker-1', role: 'writer' },
-          ],
-          cwd,
-        ));
+      runtime = await withMockPromptModeCodexAllowed(() =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-mini-tuned-routing',
+            'mini tuned routing handoff',
+            'executor',
+            1,
+            [
+              { subject: 'document routing report only', description: 'document routing report only', owner: 'worker-1', role: 'writer' },
+            ],
+            cwd,
+          )));
 
       const workerInstructions = await readFile(join(cwd, '.omx', 'state', 'team', runtime.teamName, 'workers', 'worker-1', 'AGENTS.md'), 'utf-8');
       assert.match(workerInstructions, /You are operating as the \*\*writer\*\* role/);
@@ -2321,16 +2344,17 @@ process.on('SIGTERM', () => process.exit(0));
 
     let runtime: TeamRuntime | null = null;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-detached-worktree-paths',
-          'detached worktree path resolution',
-          'executor',
-          1,
-          [{ subject: 's', description: 'd', owner: 'worker-1' }],
-          repo,
-          { worktreeMode: { enabled: true, detached: true, name: null } },
-        ));
+      runtime = await withMockPromptModeCodexAllowed(() =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-detached-worktree-paths',
+            'detached worktree path resolution',
+            'executor',
+            1,
+            [{ subject: 's', description: 'd', owner: 'worker-1' }],
+            repo,
+            { worktreeMode: { enabled: true, detached: true, name: null } },
+          )));
 
       const workerPath = runtime.config.workers[0]?.worktree_path;
       assert.ok(workerPath, 'detached worker should have a worktree path');
@@ -2423,16 +2447,17 @@ process.on('SIGTERM', () => process.exit(0));
 
     let runtime: TeamRuntime | null = null;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-detached-worktree-shutdown',
-          'detached worktree shutdown cleanup',
-          'executor',
-          1,
-          [],
-          repo,
-          { worktreeMode: { enabled: true, detached: true, name: null } },
-        ));
+      runtime = await withMockPromptModeCodexAllowed(() =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-detached-worktree-shutdown',
+            'detached worktree shutdown cleanup',
+            'executor',
+            1,
+            [],
+            repo,
+            { worktreeMode: { enabled: true, detached: true, name: null } },
+          )));
 
       const worktreePath = runtime.config.workers[0]?.worktree_path;
       assert.ok(worktreePath, 'worker worktree path should be persisted');
@@ -2501,16 +2526,17 @@ process.on('SIGTERM', () => process.exit(0));
 
     let runtime: TeamRuntime | null = null;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-detached-worktree-resume-metadata',
-          'detached worktree resume metadata',
-          'executor',
-          1,
-          [{ subject: 's', description: 'd', owner: 'worker-1' }],
-          repo,
-          { worktreeMode: { enabled: true, detached: true, name: null } },
-        ));
+      runtime = await withMockPromptModeCodexAllowed(() =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-detached-worktree-resume-metadata',
+            'detached worktree resume metadata',
+            'executor',
+            1,
+            [{ subject: 's', description: 'd', owner: 'worker-1' }],
+            repo,
+            { worktreeMode: { enabled: true, detached: true, name: null } },
+          )));
 
       const originalWorker = runtime.config.workers[0];
       const originalWorktreePath = originalWorker?.worktree_path;

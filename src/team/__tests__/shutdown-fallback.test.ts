@@ -28,6 +28,15 @@ function withoutTeamWorkerEnv<T>(fn: () => Promise<T>): Promise<T> {
   });
 }
 
+function withMockPromptModeCodexAllowed<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT;
+  process.env.OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT = '1';
+  return fn().finally(() => {
+    if (typeof previous === 'string') process.env.OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT = previous;
+    else delete process.env.OMX_TEST_ALLOW_NONTTY_CODEX_PROMPT;
+  });
+}
+
 describe('shutdown fallback worktree reports', () => {
   it('shutdownTeam checkpoints dirty detached worker worktrees, merges them, and writes a report', async () => {
     const repo = await initRepo();
@@ -56,16 +65,17 @@ process.on('SIGTERM', () => process.exit(0));
     let runtime: TeamRuntime | null = null;
     let preservedWorktreePath: string | null = null;
     try {
-      runtime = await withoutTeamWorkerEnv(() =>
-        startTeam(
-          'team-shutdown-fallback-report',
-          'shutdown fallback merge report',
-          'executor',
-          1,
-          [],
-          repo,
-          { worktreeMode: { enabled: true, detached: true, name: null } },
-        ));
+      runtime = await withMockPromptModeCodexAllowed(() =>
+        withoutTeamWorkerEnv(() =>
+          startTeam(
+            'team-shutdown-fallback-report',
+            'shutdown fallback merge report',
+            'executor',
+            1,
+            [],
+            repo,
+            { worktreeMode: { enabled: true, detached: true, name: null } },
+          )));
 
       const worktreePath = runtime.config.workers[0]?.worktree_path;
       assert.ok(worktreePath, 'worker worktree path should be present');
