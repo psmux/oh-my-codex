@@ -110,6 +110,11 @@ const VIEWPORT_SCROLLBACK_READY_CAPTURE = `${VIEWPORT_WITHOUT_VISIBLE_PROMPT_CAP
 
 › support lane on multi-image attach`;
 
+const QUEUED_AFTER_TOOL_CALL_CAPTURE = `• Messages to be submitted after next tool call (press esc to interrupt and send immediately)
+  ↳ Read $OMX_TEAM_STATE_ROOT/team/demo/workers/worker-1/inbox.md, work now, report progress
+
+› Write tests for @filename`;
+
 async function withMockTmuxFixture<T>(
   dirPrefix: string,
   tmuxScript: (tmuxLogPath: string) => string,
@@ -393,6 +398,128 @@ esac
         assert.notEqual(acceptIndex, -1, `expected bypass acceptance in log:\n${log}`);
         assert.notEqual(submitIndex, -1, `expected worker text submission in log:\n${log}`);
         assert.ok(acceptIndex < submitIndex, `expected bypass acceptance before worker text:\n${log}`);
+      },
+    );
+  });
+
+  it('ignores stale queued-next-tool-call banner text that only survives in scrollback history', async () => {
+    await withMockTmuxFixture(
+      'omx-tmux-codex-stale-queued-scrollback-',
+      (logPath) => `#!/bin/sh
+set -eu
+state_dir="$(dirname "${logPath}")"
+text_sent_file="$state_dir/text-sent"
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    if printf '%s\n' "$*" | grep -q -- ' -S -80'; then
+      if [ -f "$text_sent_file" ]; then
+        cat <<'EOF'
+${QUEUED_AFTER_TOOL_CALL_CAPTURE}
+EOF
+      else
+        cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+      fi
+    else
+      cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+    fi
+    exit 0
+    ;;
+  send-keys)
+    if [ "\${4:-}" = "-l" ] && [ "\${6:-}" = "check inbox" ]; then
+      : > "$text_sent_file"
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+      async ({ logPath }) => {
+        await sendToWorker('omx-team-x', 1, 'check inbox');
+        const log = await readFile(logPath, 'utf-8');
+        const enterCount = (log.match(/send-keys -t omx-team-x:1 C-m/g) || []).length;
+        assert.equal(
+          enterCount,
+          2,
+          `expected only the baseline submit presses when the queued banner is stale scrollback:\n${log}`,
+        );
+        assert.match(log, /capture-pane -t omx-team-x:1 -p/);
+        assert.match(log, /capture-pane -t omx-team-x:1 -p -S -80/);
+      },
+    );
+  });
+
+  it('keeps nudging Codex when the visible pane still shows a live queued-next-tool-call banner', async () => {
+    await withMockTmuxFixture(
+      'omx-tmux-codex-visible-queued-submit-',
+      (logPath) => `#!/bin/sh
+set -eu
+state_dir="$(dirname "${logPath}")"
+text_sent_file="$state_dir/text-sent"
+enter_count_file="$state_dir/enter-count"
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    enter_count=0
+    if [ -f "$enter_count_file" ]; then
+      enter_count=$(cat "$enter_count_file")
+    fi
+    if printf '%s\n' "$*" | grep -q -- ' -S -80'; then
+      cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+    else
+      if [ "$enter_count" -ge 4 ]; then
+        cat <<'EOF'
+initialized in .
+
+◦ Waiting for background terminal (59s…)
+EOF
+      elif [ -f "$text_sent_file" ]; then
+        cat <<'EOF'
+${QUEUED_AFTER_TOOL_CALL_CAPTURE}
+EOF
+      else
+        cat <<'EOF'
+${READY_HELPER_CAPTURE}
+EOF
+      fi
+    fi
+    exit 0
+    ;;
+  send-keys)
+    if [ "\${4:-}" = "-l" ] && [ "\${6:-}" = "check inbox" ]; then
+      : > "$text_sent_file"
+    fi
+    if [ "\${4:-}" = "C-m" ]; then
+      enter_count=0
+      if [ -f "$enter_count_file" ]; then
+        enter_count=$(cat "$enter_count_file")
+      fi
+      enter_count=$((enter_count + 1))
+      printf '%s' "$enter_count" > "$enter_count_file"
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+      async ({ logPath }) => {
+        await sendToWorker('omx-team-x', 1, 'check inbox');
+        const log = await readFile(logPath, 'utf-8');
+        const enterCount = (log.match(/send-keys -t omx-team-x:1 C-m/g) || []).length;
+        assert.ok(
+          enterCount >= 4,
+          `expected extra submit nudges when Codex queues the trigger:\n${log}`,
+        );
       },
     );
   });
