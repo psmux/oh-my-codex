@@ -1,6 +1,6 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,6 +102,13 @@ async function readTeamDeliveryLog(cwd: string): Promise<Array<Record<string, un
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+async function listDispatchProcessingLeases(cwd: string, teamName: string): Promise<string[]> {
+  const dispatchDir = join(cwd, '.omx', 'state', 'team', teamName, 'dispatch');
+  return (await readdir(dispatchDir).catch(() => []))
+    .filter((entry) => entry.startsWith('.processing-'))
+    .sort();
 }
 
 async function writeCompatRuntimeFixture(runtimePath: string): Promise<void> {
@@ -852,6 +859,130 @@ exit 0
       else delete process.env.OMX_DISPATCH_LOCK_TIMEOUT_MS;
       if (typeof previousRuntimeBridge === 'string') process.env.OMX_RUNTIME_BRIDGE = previousRuntimeBridge;
       else delete process.env.OMX_RUNTIME_BRIDGE;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('reserves per-issue cooldown before releasing the dispatch lock to a concurrent drain', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-hook-team-dispatch-'));
+    const previousIssueCooldown = process.env.OMX_TEAM_DISPATCH_ISSUE_COOLDOWN_MS;
+    let markInjectorStarted = () => {};
+    const injectorStarted = new Promise<void>((resolve) => {
+      markInjectorStarted = () => resolve();
+    });
+    let releaseInjector = () => {};
+    const blockFirstInjector = new Promise<void>((resolve) => {
+      releaseInjector = () => resolve();
+    });
+    let injectCount = 0;
+    try {
+      process.env.OMX_TEAM_DISPATCH_ISSUE_COOLDOWN_MS = '900000';
+      await initTeamState('alpha', 'task', 'executor', 2, cwd);
+      const first = await enqueueDispatchRequest('alpha', {
+        kind: 'inbox',
+        to_worker: 'worker-1',
+        worker_index: 1,
+        trigger_message: 'IND-123 first follow-up',
+      }, cwd);
+      const second = await enqueueDispatchRequest('alpha', {
+        kind: 'inbox',
+        to_worker: 'worker-2',
+        worker_index: 2,
+        trigger_message: 'IND-123 second follow-up',
+      }, cwd);
+
+      const modulePath = new URL('../../../dist/scripts/notify-hook/team-dispatch.js', import.meta.url).pathname;
+      const mod = await import(pathToFileURL(modulePath).href);
+      const slowDrain = mod.drainPendingTeamDispatch({
+        cwd,
+        maxPerTick: 1,
+        injector: async () => {
+          injectCount += 1;
+          if (injectCount === 1) {
+            markInjectorStarted();
+            await blockFirstInjector;
+          }
+          return { ok: true, reason: 'tmux_send_keys_confirmed' };
+        },
+      });
+
+      await injectorStarted;
+      const concurrentDrain = await mod.drainPendingTeamDispatch({
+        cwd,
+        maxPerTick: 1,
+        injector: async () => {
+          injectCount += 1;
+          return { ok: true, reason: 'tmux_send_keys_confirmed' };
+        },
+      });
+      releaseInjector();
+      const firstResult = await slowDrain;
+
+      assert.equal(injectCount, 1, 'concurrent drain must not inject same-issue follow-up while first claim is in flight');
+      assert.equal(firstResult.processed, 1);
+      assert.equal(concurrentDrain.processed, 0);
+      assert.ok(concurrentDrain.skipped >= 1);
+
+      const firstRequest = await readDispatchRequest('alpha', first.request.request_id, cwd);
+      const secondRequest = await readDispatchRequest('alpha', second.request.request_id, cwd);
+      assert.equal(firstRequest?.status, 'notified');
+      assert.equal(secondRequest?.status, 'pending');
+      assert.equal(secondRequest?.attempt_count, 0);
+    } finally {
+      releaseInjector();
+      if (typeof previousIssueCooldown === 'string') process.env.OMX_TEAM_DISPATCH_ISSUE_COOLDOWN_MS = previousIssueCooldown;
+      else delete process.env.OMX_TEAM_DISPATCH_ISSUE_COOLDOWN_MS;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('releases every preclaimed dispatch lease when a claimed injector throws', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-hook-team-dispatch-'));
+    try {
+      await initTeamState('alpha', 'task', 'executor', 2, cwd);
+      const first = await enqueueDispatchRequest('alpha', {
+        kind: 'inbox',
+        to_worker: 'worker-1',
+        worker_index: 1,
+        trigger_message: 'first request',
+      }, cwd);
+      const second = await enqueueDispatchRequest('alpha', {
+        kind: 'inbox',
+        to_worker: 'worker-2',
+        worker_index: 2,
+        trigger_message: 'second request',
+      }, cwd);
+
+      const modulePath = new URL('../../../dist/scripts/notify-hook/team-dispatch.js', import.meta.url).pathname;
+      const mod = await import(pathToFileURL(modulePath).href);
+      let attempt = 0;
+      await assert.rejects(
+        () => mod.drainPendingTeamDispatch({
+          cwd,
+          maxPerTick: 5,
+          injector: async () => {
+            attempt += 1;
+            if (attempt === 1) throw new Error('injector exploded');
+            return { ok: true, reason: 'tmux_send_keys_confirmed' };
+          },
+        }),
+        /injector exploded/,
+      );
+
+      assert.deepEqual(await listDispatchProcessingLeases(cwd, 'alpha'), []);
+
+      const retry = await mod.drainPendingTeamDispatch({
+        cwd,
+        maxPerTick: 5,
+        injector: async () => ({ ok: true, reason: 'tmux_send_keys_confirmed' }),
+      });
+      assert.equal(retry.processed, 2, 'later drain should not be blocked by stale preclaimed leases');
+
+      const firstRequest = await readDispatchRequest('alpha', first.request.request_id, cwd);
+      const secondRequest = await readDispatchRequest('alpha', second.request.request_id, cwd);
+      assert.equal(firstRequest?.status, 'notified');
+      assert.equal(secondRequest?.status, 'notified');
+    } finally {
       await rm(cwd, { recursive: true, force: true });
     }
   });

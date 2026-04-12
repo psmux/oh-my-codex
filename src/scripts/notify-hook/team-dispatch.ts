@@ -184,6 +184,31 @@ function parseTriggerCooldownEntry(entry) {
   };
 }
 
+function reserveDispatchCooldowns({
+  issueCooldownMs,
+  triggerCooldownMs,
+  issueCooldownByIssue,
+  triggerCooldownByKey,
+  issueKey,
+  triggerKey,
+  requestId,
+  reservedAt = Date.now(),
+}) {
+  let mutated = false;
+  if (issueKey && issueCooldownMs > 0) {
+    issueCooldownByIssue[issueKey] = reservedAt;
+    mutated = true;
+  }
+  if (triggerKey && triggerCooldownMs > 0) {
+    triggerCooldownByKey[triggerKey] = {
+      at: reservedAt,
+      last_request_id: safeString(requestId).trim(),
+    };
+    mutated = true;
+  }
+  return mutated;
+}
+
 async function withLockDirectory(lockDir, timeoutError, fn) {
   const ownerPath = join(lockDir, 'owner');
   const ownerToken = `${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
@@ -416,17 +441,15 @@ async function finalizeClaimedDispatchRequest({
     const nowIso = new Date().toISOString();
     let mutated = false;
 
-    if (issueKey && issueCooldownMs > 0) {
-      issueCooldownByIssue[issueKey] = Date.now();
-      mutated = true;
-    }
-    if (triggerKey && triggerCooldownMs > 0) {
-      triggerCooldownByKey[triggerKey] = {
-        at: Date.now(),
-        last_request_id: safeString(request.request_id).trim(),
-      };
-      mutated = true;
-    }
+    mutated = reserveDispatchCooldowns({
+      issueCooldownMs,
+      triggerCooldownMs,
+      issueCooldownByIssue,
+      triggerCooldownByKey,
+      issueKey,
+      triggerKey,
+      requestId: request.request_id,
+    }) || mutated;
 
     request.attempt_count = Number.isFinite(request.attempt_count) ? Math.max(0, request.attempt_count + 1) : 1;
     request.updated_at = nowIso;
@@ -866,8 +889,6 @@ export async function drainPendingTeamDispatch({
       const triggerCooldownState = await readTriggerCooldownState(teamDirPath);
       const issueCooldownByIssue = issueCooldownState.by_issue || {};
       const triggerCooldownByKey = triggerCooldownState.by_trigger || {};
-      const plannedIssueKeys = new Set();
-      const plannedTriggerKeys = new Set();
       const nowMs = Date.now();
 
       let mutated = false;
@@ -931,10 +952,6 @@ export async function drainPendingTeamDispatch({
 
         const issueKey = extractIssueKey(request.trigger_message);
         if (issueCooldownMs > 0 && issueKey) {
-          if (plannedIssueKeys.has(issueKey)) {
-            skipped += 1;
-            continue;
-          }
           const lastInjectedMs = Number(issueCooldownByIssue[issueKey]);
           if (Number.isFinite(lastInjectedMs) && lastInjectedMs > 0 && nowMs - lastInjectedMs < issueCooldownMs) {
             skipped += 1;
@@ -944,10 +961,6 @@ export async function drainPendingTeamDispatch({
 
         const triggerKey = normalizeTriggerKey(request.trigger_message);
         if (triggerCooldownMs > 0 && triggerKey) {
-          if (plannedTriggerKeys.has(triggerKey)) {
-            skipped += 1;
-            continue;
-          }
           const parsed = parseTriggerCooldownEntry(triggerCooldownByKey[triggerKey]);
           const withinCooldown = Number.isFinite(parsed.at) && parsed.at > 0 && nowMs - parsed.at < triggerCooldownMs;
           const sameRequestRetry = parsed.lastRequestId !== '' && parsed.lastRequestId === safeString(request.request_id).trim();
@@ -962,12 +975,19 @@ export async function drainPendingTeamDispatch({
           skipped += 1;
           continue;
         }
+        mutated = reserveDispatchCooldowns({
+          issueCooldownMs,
+          triggerCooldownMs,
+          issueCooldownByIssue,
+          triggerCooldownByKey,
+          issueKey,
+          triggerKey,
+          requestId: request.request_id,
+        }) || mutated;
         claims.push({
           request: { ...request },
           lease,
         });
-        if (issueKey) plannedIssueKeys.add(issueKey);
-        if (triggerKey) plannedTriggerKeys.add(triggerKey);
       }
 
       if (mutated) {
@@ -982,25 +1002,33 @@ export async function drainPendingTeamDispatch({
       }
     });
 
-    for (const claim of claims) {
-      try {
-        const result = await injector(claim.request, config, resolve(cwd), stateDir);
-        const delta = await finalizeClaimedDispatchRequest({
-          claim,
-          result,
-          teamName,
-          teamDirPath,
-          config,
-          cwd,
-          stateDir,
-          logsDir,
-          issueCooldownMs,
-          triggerCooldownMs,
-        });
-        processed += delta.processed;
-        skipped += delta.skipped;
-        failed += delta.failed;
-      } finally {
+    try {
+      for (const claim of claims) {
+        try {
+          const result = await injector(claim.request, config, resolve(cwd), stateDir);
+          const delta = await finalizeClaimedDispatchRequest({
+            claim,
+            result,
+            teamName,
+            teamDirPath,
+            config,
+            cwd,
+            stateDir,
+            logsDir,
+            issueCooldownMs,
+            triggerCooldownMs,
+          });
+          processed += delta.processed;
+          skipped += delta.skipped;
+          failed += delta.failed;
+        } finally {
+          claim.released = true;
+          await releaseDispatchRequestLease(claim.lease);
+        }
+      }
+    } finally {
+      for (const claim of claims) {
+        if (claim.released) continue;
         await releaseDispatchRequestLease(claim.lease);
       }
     }
