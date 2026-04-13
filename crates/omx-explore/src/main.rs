@@ -469,18 +469,37 @@ fn build_direct_wrapper(self_exe: &Path, command: &str) -> Result<String, String
 
 fn resolve_host_command(command: &str) -> Option<PathBuf> {
     let candidate = Path::new(command);
-    if candidate.is_absolute() && candidate.exists() {
+    if candidate.is_absolute() && is_usable_host_command(candidate) {
         return Some(candidate.to_path_buf());
     }
 
     let path = env::var_os("PATH")?;
     for entry in env::split_paths(&path) {
         let resolved = entry.join(command);
-        if resolved.exists() {
+        if is_usable_host_command(&resolved) {
             return Some(resolved);
         }
     }
     None
+}
+
+fn is_usable_host_command(path: &Path) -> bool {
+    let metadata = match path.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -885,6 +904,7 @@ mod tests {
 
     #[test]
     fn codex_launch_for_env_node_shebang_uses_host_node_absolute_path() {
+        let _guard = env_lock();
         let root = temp_allowlist_dir().expect("temp root");
         let script_path = root.path.join("codex-script");
         write(&script_path, b"#!/usr/bin/env node\nconsole.log(\"ok\");\n").expect("write script");
@@ -893,6 +913,109 @@ mod tests {
             .expect("launch config");
         let expected_node = resolve_host_command("node").expect("host node path");
         assert_eq!(launch.program, expected_node.display().to_string());
+        assert_eq!(launch.leading_args, vec![script_path.display().to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_host_command_skips_directory_and_non_executable_path_entries() {
+        let _guard = env_lock();
+        let root = temp_allowlist_dir().expect("temp root");
+        let bad_bin = root.path.join("bad-bin");
+        let blocked_file_bin = root.path.join("blocked-file-bin");
+        let good_bin = root.path.join("good-bin");
+        create_dir_all(&bad_bin).expect("create bad bin");
+        create_dir_all(&blocked_file_bin).expect("create blocked file bin");
+        create_dir_all(&good_bin).expect("create good bin");
+
+        let blocked_directory = bad_bin.join("node");
+        create_dir_all(&blocked_directory).expect("create blocked directory");
+
+        let blocked_node = blocked_file_bin.join("node");
+        write(&blocked_node, "#!/bin/sh\nexit 0\n").expect("write blocked file node");
+        let executable_node = good_bin.join("node");
+        write_executable(&executable_node, "#!/bin/sh\nexit 0\n").expect("write executable node");
+
+        #[cfg(unix)]
+        {
+            use std::fs;
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&blocked_node)
+                .expect("stat blocked node")
+                .permissions();
+            perms.set_mode(0o644);
+            fs::set_permissions(&blocked_node, perms).expect("chmod blocked node");
+        }
+
+        let original_path = env::var_os("PATH");
+        unsafe {
+            env::set_var(
+                "PATH",
+                env::join_paths([
+                    bad_bin.as_path(),
+                    blocked_file_bin.as_path(),
+                    good_bin.as_path(),
+                ])
+                .expect("join path"),
+            );
+        }
+
+        let resolved = resolve_host_command("node");
+
+        match original_path {
+            Some(value) => unsafe { env::set_var("PATH", value) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+
+        assert_eq!(resolved, Some(executable_node));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_launch_for_env_node_shebang_skips_non_executable_earlier_node_entry() {
+        let _guard = env_lock();
+        let root = temp_allowlist_dir().expect("temp root");
+        let bad_bin = root.path.join("bad-bin");
+        let good_bin = root.path.join("good-bin");
+        create_dir_all(&bad_bin).expect("create bad bin");
+        create_dir_all(&good_bin).expect("create good bin");
+
+        let blocked_node = bad_bin.join("node");
+        write(&blocked_node, "#!/bin/sh\nexit 0\n").expect("write blocked node");
+        let executable_node = good_bin.join("node");
+        write_executable(&executable_node, "#!/bin/sh\nexit 0\n").expect("write executable node");
+
+        #[cfg(unix)]
+        {
+            use std::fs;
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&blocked_node)
+                .expect("stat blocked node")
+                .permissions();
+            perms.set_mode(0o644);
+            fs::set_permissions(&blocked_node, perms).expect("chmod blocked node");
+        }
+
+        let script_path = root.path.join("codex-script");
+        write(&script_path, b"#!/usr/bin/env node\nconsole.log(\"ok\");\n").expect("write script");
+
+        let original_path = env::var_os("PATH");
+        unsafe {
+            env::set_var(
+                "PATH",
+                env::join_paths([bad_bin.as_path(), good_bin.as_path()]).expect("join path"),
+            );
+        }
+
+        let launch = codex_launch_for_binary(script_path.to_str().expect("script path"))
+            .expect("launch config");
+
+        match original_path {
+            Some(value) => unsafe { env::set_var("PATH", value) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+
+        assert_eq!(launch.program, executable_node.display().to_string());
         assert_eq!(launch.leading_args, vec![script_path.display().to_string()]);
     }
 
@@ -972,6 +1095,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn prepare_allowlist_environment_preserves_present_command_wrapper_execution() {
+        let _guard = env_lock();
         let self_exe = env::current_exe().expect("current exe");
         let pwd = resolve_host_command("pwd").expect("host pwd path");
 
