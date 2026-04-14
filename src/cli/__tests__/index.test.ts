@@ -875,6 +875,7 @@ describe("resolveTeamWorkerLaunchArgsEnv (spark)", () => {
 describe("commandOwnsLocalHelp", () => {
   it("returns true for nested commands that render their own help output", () => {
     for (const command of [
+      "adapt",
       "agents-init",
       "ask",
       "autoresearch",

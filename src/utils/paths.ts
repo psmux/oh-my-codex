@@ -296,6 +296,11 @@ export function omxPlansDir(projectRoot?: string): string {
   return join(projectRoot || process.cwd(), ".omx", "plans");
 }
 
+/** oh-my-codex adapters directory (.omx/adapters/) */
+export function omxAdaptersDir(projectRoot?: string): string {
+  return join(projectRoot || process.cwd(), ".omx", "adapters");
+}
+
 /** oh-my-codex logs directory (.omx/logs/) */
 export function omxLogsDir(projectRoot?: string): string {
   return join(projectRoot || process.cwd(), ".omx", "logs");

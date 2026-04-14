@@ -17,6 +17,7 @@ import {
   omxProjectMemoryPath,
   omxNotepadPath,
   omxPlansDir,
+  omxAdaptersDir,
   omxLogsDir,
   packageRoot,
   OMX_ENTRY_PATH_ENV,
@@ -184,6 +185,12 @@ describe("legacyUserSkillsDir", () => {
 
   it("returns ~/.agents/skills under HOME", () => {
     assert.equal(legacyUserSkillsDir(), join("/tmp/test-home", ".agents", "skills"));
+  });
+});
+
+describe("omxAdaptersDir", () => {
+  it("returns .omx/adapters under the project root", () => {
+    assert.equal(omxAdaptersDir("/my/project"), join("/my/project", ".omx", "adapters"));
   });
 });
 

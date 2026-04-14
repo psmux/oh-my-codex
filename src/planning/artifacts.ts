@@ -29,6 +29,12 @@ export interface ApprovedExecutionLaunchHint extends ApprovedPlanContext {
   linkedRalph?: boolean;
 }
 
+export interface LatestPlanningArtifactSelection {
+  prdPath: string | null;
+  testSpecPaths: string[];
+  deepInterviewSpecPaths: string[];
+}
+
 function readMatchingPaths(dir: string, pattern: RegExp): string[] {
   if (!existsSync(dir)) {
     return [];
@@ -92,23 +98,49 @@ function readApprovedPlanText(cwd: string): { content: string; context: Approved
   const artifacts = readPlanningArtifacts(cwd);
   if (!isPlanningComplete(artifacts)) return null;
 
-  const latestPrdPath = artifacts.prdPaths.at(-1);
+  const selection = selectLatestPlanningArtifacts(artifacts);
+  const latestPrdPath = selection.prdPath;
   if (!latestPrdPath || !existsSync(latestPrdPath)) return null;
-
-  const slug = artifactSlug(latestPrdPath, /^prd-(?<slug>.*)\.md$/i);
 
   try {
     return {
       content: readFileSync(latestPrdPath, 'utf-8'),
       context: {
         sourcePath: latestPrdPath,
-        testSpecPaths: filterArtifactsForSlug(artifacts.testSpecPaths, /^test-?spec-(?<slug>.*)\.md$/i, slug),
-        deepInterviewSpecPaths: filterArtifactsForSlug(artifacts.deepInterviewSpecPaths, /^deep-interview-(?<slug>.*)\.md$/i, slug),
+        testSpecPaths: selection.testSpecPaths,
+        deepInterviewSpecPaths: selection.deepInterviewSpecPaths,
       },
     };
   } catch {
     return null;
   }
+}
+
+export function selectLatestPlanningArtifacts(
+  artifacts: PlanningArtifacts,
+): LatestPlanningArtifactSelection {
+  const latestPrdPath = artifacts.prdPaths.at(-1) ?? null;
+  const slug = latestPrdPath
+    ? artifactSlug(latestPrdPath, /^prd-(?<slug>.*)\.md$/i)
+    : null;
+
+  return {
+    prdPath: latestPrdPath,
+    testSpecPaths: filterArtifactsForSlug(
+      artifacts.testSpecPaths,
+      /^test-?spec-(?<slug>.*)\.md$/i,
+      slug,
+    ),
+    deepInterviewSpecPaths: filterArtifactsForSlug(
+      artifacts.deepInterviewSpecPaths,
+      /^deep-interview-(?<slug>.*)\.md$/i,
+      slug,
+    ),
+  };
+}
+
+export function readLatestPlanningArtifacts(cwd: string): LatestPlanningArtifactSelection {
+  return selectLatestPlanningArtifacts(readPlanningArtifacts(cwd));
 }
 
 export function readApprovedExecutionLaunchHint(

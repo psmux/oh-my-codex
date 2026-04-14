@@ -1,0 +1,50 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { adaptCommand } from "../adapt.js";
+
+describe("adaptCommand", () => {
+  it("prints help when called without args", async () => {
+    const out: string[] = [];
+    await adaptCommand([], {
+      stdout: (line) => out.push(line),
+    });
+    assert.match(out.join("\n"), /Usage: omx adapt <target>/i);
+  });
+
+  it("fails clearly for unknown targets", async () => {
+    await assert.rejects(
+      adaptCommand(["unknown", "probe"], {
+        stdout: () => undefined,
+      }),
+      /Supported targets: openclaw, hermes/i,
+    );
+  });
+
+  it("emits compact JSON envelopes when --json is set", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-adapt-cli-"));
+    const out: string[] = [];
+    try {
+      await adaptCommand(["openclaw", "probe", "--json"], {
+        cwd,
+        stdout: (line) => out.push(line),
+      });
+      assert.equal(out.length, 1);
+      assert.match(out[0] ?? "", /^\{"schemaVersion":"1\.0","timestamp":/);
+      assert.match(out[0] ?? "", /"target":"openclaw"/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects --write outside init", async () => {
+    await assert.rejects(
+      adaptCommand(["hermes", "status", "--write"], {
+        stdout: () => undefined,
+      }),
+      /only supported with omx adapt <target> init/i,
+    );
+  });
+});

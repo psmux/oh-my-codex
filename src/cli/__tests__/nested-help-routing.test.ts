@@ -24,6 +24,7 @@ function runOmx(cwd: string, argv: string[]) {
 
 describe('nested help routing', () => {
   for (const [argv, expectedUsage] of [
+    [['adapt', '--help'], /Usage:\s*omx adapt <target> <probe\|status\|init\|envelope\|doctor>/i],
     [['ask', '--help'], /Usage:\s*omx ask <claude\|gemini> <question or task>/i],
     [['autoresearch', '--help'], /Usage:[\s\S]*omx autoresearch <mission-dir>/i],
     [['hud', '--help'], /Usage:\s*\n\s*omx hud\s+Show current HUD state/i],

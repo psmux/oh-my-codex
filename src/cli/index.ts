@@ -31,6 +31,7 @@ import { agentsCommand } from "./agents.js";
 import { sessionCommand } from "./session-search.js";
 import { autoresearchCommand } from "./autoresearch.js";
 import { mcpParityCommand } from "./mcp-parity.js";
+import { adaptCommand } from "./adapt.js";
 import {
   MADMAX_FLAG,
   CODEX_BYPASS_FLAG,
@@ -147,6 +148,7 @@ Usage:
   omx cleanup   Kill orphaned OMX MCP server processes and remove stale OMX /tmp directories
   omx doctor --team  Check team/swarm runtime health diagnostics
   omx ask       Ask local provider CLI (claude|gemini) and write artifact output
+  omx adapt     Scaffold OMX-owned adapter foundations for persistent external targets
   omx resume    Resume a previous interactive Codex session
   omx explore   Default read-only exploration entrypoint (may adaptively use sparkshell backend)
   omx session   Search prior local session transcripts and history artifacts
@@ -261,6 +263,7 @@ type CliCommand =
   | "doctor"
   | "cleanup"
   | "ask"
+  | "adapt"
   | "explore"
   | "sparkshell"
   | "team"
@@ -281,6 +284,7 @@ type CliCommand =
 const NESTED_HELP_COMMANDS = new Set<CliCommand>([
   "ask",
   "cleanup",
+  "adapt",
   "autoresearch",
   "agents",
   "agents-init",
@@ -716,6 +720,9 @@ export async function main(args: string[]): Promise<void> {
       }
       case "ask":
         await askCommand(args.slice(1));
+        break;
+      case "adapt":
+        await adaptCommand(args.slice(1));
         break;
       case "cleanup":
         await cleanupCommand(args.slice(1));
