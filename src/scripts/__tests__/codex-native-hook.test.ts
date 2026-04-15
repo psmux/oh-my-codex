@@ -2958,6 +2958,54 @@ esac
     }
   });
 
+  it("suppresses duplicate native auto-nudge replays across native/canonical session-id drift", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-auto-nudge-session-drift-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      await mkdir(stateDir, { recursive: true });
+      process.env.OMX_SESSION_ID = "omx-canonical";
+      await writeJson(join(stateDir, "session.json"), {
+        session_id: "omx-canonical",
+        native_session_id: "codex-native",
+      });
+
+      await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "codex-native",
+          thread_id: "thread-stop-auto-drift",
+          turn_id: "turn-stop-auto-drift-1",
+          last_assistant_message: "Keep going and finish the cleanup.",
+        },
+        { cwd },
+      );
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "omx-canonical",
+          thread_id: "thread-stop-auto-drift",
+          turn_id: "turn-stop-auto-drift-1",
+          stop_hook_active: true,
+          last_assistant_message: "Keep going and finish the cleanup.",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.equal(result.outputJson, null);
+
+      const persisted = JSON.parse(
+        await readFile(join(stateDir, "native-stop-state.json"), "utf-8"),
+      ) as { sessions?: Record<string, unknown> };
+      assert.deepEqual(Object.keys(persisted.sessions ?? {}), ["omx-canonical"]);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("re-fires native auto-nudge for a later fresh Stop reply even when stop_hook_active is true", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-auto-nudge-refire-"));
     try {
@@ -3417,6 +3465,86 @@ esac
         stopReason: "team_team-verify",
         systemMessage: "OMX team pipeline is still active at phase team-verify.",
       });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("suppresses duplicate team Stop replays across native/canonical session-id drift", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-team-session-drift-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      await mkdir(join(stateDir, "sessions", "omx-canonical"), { recursive: true });
+      process.env.OMX_SESSION_ID = "omx-canonical";
+      await writeJson(join(stateDir, "session.json"), {
+        session_id: "omx-canonical",
+        native_session_id: "codex-native",
+      });
+      await writeJson(join(stateDir, "sessions", "omx-canonical", "team-state.json"), {
+        active: true,
+        current_phase: "starting",
+        team_name: "current-team",
+        session_id: "omx-canonical",
+      });
+      await writeJson(join(stateDir, "team", "current-team", "phase.json"), {
+        current_phase: "team-verify",
+        max_fix_attempts: 3,
+        current_fix_attempt: 1,
+        transitions: [],
+        updated_at: new Date().toISOString(),
+      });
+
+      await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "codex-native",
+          thread_id: "thread-stop-team-drift",
+          turn_id: "turn-stop-team-drift-1",
+        },
+        { cwd },
+      );
+
+      const duplicate = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "omx-canonical",
+          thread_id: "thread-stop-team-drift",
+          turn_id: "turn-stop-team-drift-1",
+          stop_hook_active: true,
+        },
+        { cwd },
+      );
+
+      assert.equal(duplicate.omxEventName, "stop");
+      assert.equal(duplicate.outputJson, null);
+
+      const fresh = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "omx-canonical",
+          thread_id: "thread-stop-team-drift",
+          turn_id: "turn-stop-team-drift-2",
+          stop_hook_active: true,
+        },
+        { cwd },
+      );
+
+      assert.equal(fresh.omxEventName, "stop");
+      assert.deepEqual(fresh.outputJson, {
+        decision: "block",
+        reason:
+          `OMX team pipeline is still active (current-team) at phase team-verify; continue coordinating until the team reaches a terminal phase.${TEAM_STOP_COMMIT_GUIDANCE}`,
+        stopReason: "team_team-verify",
+        systemMessage: "OMX team pipeline is still active at phase team-verify.",
+      });
+
+      const persisted = JSON.parse(
+        await readFile(join(stateDir, "native-stop-state.json"), "utf-8"),
+      ) as { sessions?: Record<string, unknown> };
+      assert.deepEqual(Object.keys(persisted.sessions ?? {}), ["omx-canonical"]);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

@@ -915,12 +915,20 @@ async function readStopAutoNudgePhase(
   return modePhase === "intent-first" ? "planning" : "";
 }
 
+function resolveRepeatableStopSessionId(
+  payload: CodexHookPayload,
+  canonicalSessionId?: string,
+): string {
+  return canonicalSessionId?.trim() || readPayloadSessionId(payload) || "";
+}
+
 function buildRepeatableStopSignature(
   payload: CodexHookPayload,
   kind: string,
   detail = "",
+  canonicalSessionId?: string,
 ): string {
-  const sessionId = readPayloadSessionId(payload) || "no-session";
+  const sessionId = resolveRepeatableStopSessionId(payload, canonicalSessionId) || "no-session";
   const threadId = readPayloadThreadId(payload) || "no-thread";
   const turnId = readPayloadTurnId(payload);
   const normalizedDetail = normalizeAutoNudgeSignatureText(detail) || safeString(detail).trim().toLowerCase();
@@ -949,8 +957,11 @@ function buildRepeatableStopSignature(
   ].join("|");
 }
 
-function readNativeStopSessionKey(payload: CodexHookPayload): string {
-  return readPayloadSessionId(payload) || readPayloadThreadId(payload) || "global";
+function readNativeStopSessionKey(
+  payload: CodexHookPayload,
+  canonicalSessionId?: string,
+): string {
+  return resolveRepeatableStopSessionId(payload, canonicalSessionId) || readPayloadThreadId(payload) || "global";
 }
 
 function hasManagedStopSessionEnv(sessionIds: string[]): boolean {
@@ -989,12 +1000,13 @@ async function persistNativeStopSignature(
   stateDir: string,
   payload: CodexHookPayload,
   signature: string,
+  canonicalSessionId?: string,
 ): Promise<void> {
   if (!signature) return;
   const statePath = join(stateDir, NATIVE_STOP_STATE_FILE);
   const state = await readJsonIfExists(statePath) ?? {};
   const sessions = safeObject(state.sessions);
-  const sessionKey = readNativeStopSessionKey(payload);
+  const sessionKey = readNativeStopSessionKey(payload, canonicalSessionId);
   sessions[sessionKey] = {
     ...safeObject(sessions[sessionKey]),
     last_signature: signature,
@@ -1012,17 +1024,21 @@ async function maybeReturnRepeatableStopOutput(
   stateDir: string,
   signature: string,
   output: Record<string, unknown> | null,
+  canonicalSessionId?: string,
 ): Promise<Record<string, unknown> | null> {
   if (!output) return null;
   const stopHookActive = payload.stop_hook_active === true || payload.stopHookActive === true;
   if (stopHookActive) {
     const state = await readJsonIfExists(join(stateDir, NATIVE_STOP_STATE_FILE)) ?? {};
-    const previousSignature = readPreviousNativeStopSignature(state, readNativeStopSessionKey(payload));
+    const previousSignature = readPreviousNativeStopSignature(
+      state,
+      readNativeStopSessionKey(payload, canonicalSessionId),
+    );
     if (!signature || previousSignature === signature) {
       return null;
     }
   }
-  await persistNativeStopSignature(stateDir, payload, signature);
+  await persistNativeStopSignature(stateDir, payload, signature, canonicalSessionId);
   return output;
 }
 
@@ -1114,6 +1130,7 @@ async function maybeBuildReleaseReadinessFinalizeStopOutput(
       stopReason: "release_readiness_auto_finalize",
       systemMessage: RELEASE_READINESS_FINALIZE_SYSTEM_MESSAGE,
     },
+    sessionId,
   );
   return { matched: true, output };
 }
@@ -1282,8 +1299,19 @@ async function buildStopHookOutput(
 
     const teamOutput = await buildTeamStopOutput(cwd, canonicalSessionId);
     if (teamOutput) {
-      const teamSignature = buildRepeatableStopSignature(payload, "team-stop", safeString(teamOutput.stopReason));
-      return await maybeReturnRepeatableStopOutput(payload, stateDir, teamSignature, teamOutput);
+      const teamSignature = buildRepeatableStopSignature(
+        payload,
+        "team-stop",
+        safeString(teamOutput.stopReason),
+        canonicalSessionId,
+      );
+      return await maybeReturnRepeatableStopOutput(
+        payload,
+        stateDir,
+        teamSignature,
+        teamOutput,
+        canonicalSessionId,
+      );
     }
 
     if (canonicalSessionId) {
@@ -1293,12 +1321,18 @@ async function buildStopHookOutput(
           canonicalTeam.teamName,
           canonicalTeam.phase,
         );
-        const canonicalTeamSignature = buildRepeatableStopSignature(payload, "team-stop", `${canonicalTeam.teamName}|${canonicalTeam.phase}`);
+        const canonicalTeamSignature = buildRepeatableStopSignature(
+          payload,
+          "team-stop",
+          `${canonicalTeam.teamName}|${canonicalTeam.phase}`,
+          canonicalSessionId,
+        );
         const repeatedCanonicalTeamOutput = await maybeReturnRepeatableStopOutput(
           payload,
           stateDir,
           canonicalTeamSignature,
           canonicalTeamOutput,
+          canonicalSessionId,
         );
         if (repeatedCanonicalTeamOutput) return repeatedCanonicalTeamOutput;
       }
@@ -1325,7 +1359,7 @@ async function buildStopHookOutput(
       return await maybeReturnRepeatableStopOutput(
         payload,
         stateDir,
-        buildRepeatableStopSignature(payload, "auto-nudge", lastAssistantMessage),
+        buildRepeatableStopSignature(payload, "auto-nudge", lastAssistantMessage, canonicalSessionId),
         {
           decision: "block",
           reason: effectiveResponse,
@@ -1333,6 +1367,7 @@ async function buildStopHookOutput(
           systemMessage:
             "OMX native Stop detected a stall/permission-style handoff and continued the turn automatically.",
         },
+        canonicalSessionId,
       );
     }
 
