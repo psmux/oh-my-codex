@@ -12,6 +12,7 @@ const CODEX_BIN_ENV: &str = "OMX_EXPLORE_CODEX_BIN";
 const HARNESS_ROOT_ENV: &str = "OMX_EXPLORE_ROOT";
 const INTERNAL_DIRECT_WRAPPER_FLAG: &str = "--internal-allowlist-direct";
 const INTERNAL_SHELL_WRAPPER_FLAG: &str = "--internal-allowlist-shell";
+const TEMP_ALLOWLIST_DIR_PREFIX: &str = "omx-explore-allowlist-";
 const WINDOWS_UNSUPPORTED_ALLOWLIST_MESSAGE: &str =
     "omx explore built-in harness is not ready on Windows because its allowlist runtime relies on POSIX sh/bash wrappers. Set OMX_EXPLORE_BIN to a compatible custom harness, prefer `omx sparkshell` for shell-native read-only lookups, or run `omx doctor` for readiness details.";
 
@@ -580,18 +581,44 @@ fn build_direct_wrapper(self_exe: &Path, command: &str) -> Result<String, String
 
 fn resolve_host_command(command: &str) -> Option<PathBuf> {
     let candidate = Path::new(command);
-    if candidate.is_absolute() && is_usable_host_command(candidate) {
+    if candidate.is_absolute()
+        && is_usable_host_command(candidate)
+        && !is_omx_explore_allowlist_path(candidate)
+    {
         return Some(candidate.to_path_buf());
     }
 
     let path = env::var_os("PATH")?;
     for entry in env::split_paths(&path) {
         let resolved = entry.join(command);
-        if is_usable_host_command(&resolved) {
+        if is_usable_host_command(&resolved) && !is_omx_explore_allowlist_path(&resolved) {
             return Some(resolved);
         }
     }
     None
+}
+
+fn is_omx_explore_allowlist_path(path: &Path) -> bool {
+    fn is_under_allowlist_bin(path: &Path) -> bool {
+        path.ancestors().any(|ancestor| {
+            let is_allowlist_root = ancestor
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(TEMP_ALLOWLIST_DIR_PREFIX));
+            if !is_allowlist_root {
+                return false;
+            }
+            path.strip_prefix(ancestor)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .is_some_and(|component| component.as_os_str() == "bin")
+        })
+    }
+
+    is_under_allowlist_bin(path)
+        || canonicalize_existing_prefix(path)
+            .as_deref()
+            .is_some_and(is_under_allowlist_bin)
 }
 
 fn is_usable_host_command(path: &Path) -> bool {
@@ -988,7 +1015,17 @@ mod tests {
     #[test]
     fn resolve_codex_binary_resolves_bare_env_override_from_path() {
         let _guard = env_lock();
-        let root = temp_allowlist_dir().expect("temp root");
+        let root = TempDirGuard {
+            path: env::temp_dir().join(format!(
+                "omx-explore-resolve-codex-binary-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )),
+        };
+        create_dir_all(&root.path).expect("create temp root");
         let bin_dir = root.path.join("bin");
         create_dir_all(&bin_dir).expect("create bin");
         let fake_codex = bin_dir.join("codex-custom");
@@ -1270,6 +1307,72 @@ exec node "$basedir/../@openai/codex/bin/codex.js" "$@"
         assert!(wrapper.contains(&self_exe.display().to_string()));
         assert!(wrapper.contains(&format!("pwd:{}", pwd.display())));
         assert!(!wrapper.contains("exit 127"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_host_command_skips_omx_explore_allowlist_wrappers() {
+        let _guard = env_lock();
+        let allowlist_root = temp_allowlist_dir().expect("allowlist root");
+        let real_root = TempDirGuard {
+            path: env::temp_dir().join(format!(
+                "omx-explore-host-resolution-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )),
+        };
+        create_dir_all(&real_root.path).expect("create real root");
+        let real_bin = real_root.path.join("real-bin");
+        let allowlist_bin = allowlist_root
+            .path
+            .join(format!("{TEMP_ALLOWLIST_DIR_PREFIX}fixture"))
+            .join("bin");
+        create_dir_all(&real_bin).expect("create real bin");
+        create_dir_all(&allowlist_bin).expect("create allowlist bin");
+
+        let real_grep = real_bin.join("grep");
+        write_executable(&real_grep, "#!/bin/sh\nexit 0\n").expect("write real grep");
+        let wrapper_grep = allowlist_bin.join("grep");
+        write_executable(&wrapper_grep, "#!/bin/sh\nexit 0\n").expect("write wrapper grep");
+
+        let original_path = env::var_os("PATH");
+        unsafe {
+            env::set_var(
+                "PATH",
+                env::join_paths([allowlist_bin.as_path(), real_bin.as_path()]).expect("join path"),
+            );
+        }
+
+        let resolved = resolve_host_command("grep");
+
+        match original_path {
+            Some(value) => unsafe { env::set_var("PATH", value) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+
+        assert_eq!(resolved, Some(real_grep));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_host_command_rejects_absolute_allowlist_wrapper_paths() {
+        let _guard = env_lock();
+        let root = temp_allowlist_dir().expect("temp root");
+        let wrapper_dir = root
+            .path
+            .join(format!("{TEMP_ALLOWLIST_DIR_PREFIX}fixture"))
+            .join("bin");
+        create_dir_all(&wrapper_dir).expect("create wrapper dir");
+        let wrapper = wrapper_dir.join("grep");
+        write_executable(&wrapper, "#!/bin/sh\nexit 0\n").expect("write wrapper");
+
+        assert_eq!(
+            resolve_host_command(wrapper.to_str().expect("wrapper path")),
+            None
+        );
     }
 
     #[test]
