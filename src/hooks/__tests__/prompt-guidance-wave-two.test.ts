@@ -22,6 +22,14 @@ describe('prompt guidance wave two contract', () => {
     assert.match(loadSurface('prompts/explore.md'), /answer is grounded/i);
   });
 
+  it('researcher encodes a docs-first technical research workflow', () => {
+    const researcher = loadSurface('prompts/researcher.md');
+    assert.match(researcher, /classify the request/i);
+    assert.match(researcher, /documentation structure before page-level fetches/i);
+    assert.match(researcher, /examples only after the docs baseline is grounded/i);
+    assert.match(researcher, /source-reference evidence/i);
+  });
+
   it('security and verifier-adjacent prompts preserve merge-if-green as downstream context', () => {
     assert.match(loadSurface('prompts/security-reviewer.md'), /merge if CI green/i);
     assert.match(loadSurface('prompts/critic.md'), /later workflow condition|downstream context/i);
