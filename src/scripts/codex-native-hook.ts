@@ -1189,6 +1189,7 @@ async function returnPersistentStopBlock(
   signatureValue: string,
   output: Record<string, unknown> | null,
   canonicalSessionId?: string,
+  options: { allowRepeatDuringStopHook?: boolean } = { allowRepeatDuringStopHook: true },
 ): Promise<Record<string, unknown> | null> {
   return await maybeReturnRepeatableStopOutput(
     payload,
@@ -1196,7 +1197,7 @@ async function returnPersistentStopBlock(
     buildRepeatableStopSignature(payload, signatureKind, signatureValue, canonicalSessionId),
     output,
     canonicalSessionId,
-    { allowRepeatDuringStopHook: true },
+    options,
   );
 }
 
@@ -1479,6 +1480,7 @@ async function buildStopHookOutput(
         safeString(ultraworkOutput.stopReason),
         ultraworkOutput,
         canonicalSessionId,
+        { allowRepeatDuringStopHook: false },
       );
     }
 

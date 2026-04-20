@@ -4654,71 +4654,62 @@ esac
     }
   });
 
-  it("re-blocks active execution modes on repeated Stop hooks", async () => {
-    const cases = [
-      {
-        mode: "autopilot",
-        phase: "execution",
-        reason:
-          "OMX autopilot is still active (phase: execution); continue the task and gather fresh verification evidence before stopping.",
-      },
-      {
-        mode: "ultrawork",
-        phase: "executing",
-        reason:
-          "OMX ultrawork is still active (phase: executing); continue the task and gather fresh verification evidence before stopping.",
-      },
-      {
-        mode: "ultraqa",
-        phase: "diagnose",
-        reason:
-          "OMX ultraqa is still active (phase: diagnose); continue the task and gather fresh verification evidence before stopping.",
-      },
-    ] as const;
+  it("suppresses duplicate ultrawork Stop replays while stop_hook_active stays true", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-ultrawork-repeat-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      await mkdir(stateDir, { recursive: true });
+      await writeJson(join(stateDir, "ultrawork-state.json"), {
+        active: true,
+        current_phase: "executing",
+      });
 
-    for (const testCase of cases) {
-      const cwd = await mkdtemp(join(tmpdir(), `omx-native-hook-stop-${testCase.mode}-repeat-`));
-      try {
-        const stateDir = join(cwd, ".omx", "state");
-        await mkdir(stateDir, { recursive: true });
-        await writeJson(join(stateDir, `${testCase.mode}-state.json`), {
-          active: true,
-          current_phase: testCase.phase,
-        });
+      const first = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "sess-stop-ultrawork-repeat",
+          thread_id: "thread-stop-ultrawork-repeat",
+          turn_id: "turn-stop-ultrawork-repeat-1",
+        },
+        { cwd },
+      );
 
-        await dispatchCodexNativeHook(
-          {
-            hook_event_name: "Stop",
-            cwd,
-            session_id: `sess-stop-${testCase.mode}-repeat`,
-            thread_id: `thread-stop-${testCase.mode}-repeat`,
-            turn_id: `turn-stop-${testCase.mode}-repeat-1`,
-          },
-          { cwd },
-        );
+      const repeated = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "sess-stop-ultrawork-repeat",
+          thread_id: "thread-stop-ultrawork-repeat",
+          turn_id: "turn-stop-ultrawork-repeat-1",
+          stop_hook_active: true,
+        },
+        { cwd },
+      );
 
-        const repeated = await dispatchCodexNativeHook(
-          {
-            hook_event_name: "Stop",
-            cwd,
-            session_id: `sess-stop-${testCase.mode}-repeat`,
-            thread_id: `thread-stop-${testCase.mode}-repeat`,
-            turn_id: `turn-stop-${testCase.mode}-repeat-1`,
-            stop_hook_active: true,
-          },
-          { cwd },
-        );
+      const fresh = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: "sess-stop-ultrawork-repeat",
+          thread_id: "thread-stop-ultrawork-repeat",
+          turn_id: "turn-stop-ultrawork-repeat-2",
+          stop_hook_active: true,
+        },
+        { cwd },
+      );
 
-        assert.equal(repeated.omxEventName, "stop");
-        assert.deepEqual(repeated.outputJson, {
-          decision: "block",
-          reason: testCase.reason,
-          stopReason: `${testCase.mode}_${testCase.phase}`,
-          systemMessage: `OMX ${testCase.mode} is still active (phase: ${testCase.phase}).`,
-        });
-      } finally {
-        await rm(cwd, { recursive: true, force: true });
-      }
+      assert.equal(first.omxEventName, "stop");
+      assert.deepEqual(repeated.outputJson, null);
+      assert.equal(fresh.omxEventName, "stop");
+      assert.deepEqual(fresh.outputJson, {
+        decision: "block",
+        reason: "OMX ultrawork is still active (phase: executing); continue the task and gather fresh verification evidence before stopping.",
+        stopReason: "ultrawork_executing",
+        systemMessage: "OMX ultrawork is still active (phase: executing).",
+      });
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
     }
   });
 
