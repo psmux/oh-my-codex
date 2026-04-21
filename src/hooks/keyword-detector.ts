@@ -401,6 +401,17 @@ const KEYWORDS_REQUIRING_INTENT = new Set(['ralph', 'team', 'swarm', 'stop', 'ab
 
 type IntentKeyword = 'ralph' | 'team' | 'swarm' | 'stop' | 'abort' | 'parallel' | 'autoresearch';
 
+const DEEP_INTERVIEW_ACTIVATION_PATTERNS: RegExp[] = [
+  /(?:^|[^\w])\$(?:deep-interview)\b/i,
+  /\/prompts:deep-interview\b/i,
+  /\b(?:use|run|start|enable|launch|invoke|activate|do|begin)\s+(?:a\s+|an\s+|the\s+)?deep(?:[- ]+)interview\b/i,
+  /^(?:please\s+)?deep(?:[- ]+)interview\b/i,
+  /\bdeep(?:[- ]+)interview\s+(?:this|first|before|me|now)\b/i,
+  /\binterview\s+(?:me|this|the\s+(?:request|task|problem))\b/i,
+];
+
+const DEEP_INTERVIEW_MANAGEMENT_MENTION_PATTERN = /\b(?:clear|cleanup|clean\s+up|remove|reset|delete|fix|debug|report|reported|status|state|lock|unlock|active|inactive|session(?:-scoped)?|scope|scoped|global|legacy|root|mode|workflow)\b/i;
+
 /**
  * Per-keyword intent patterns used when a keyword is in KEYWORDS_REQUIRING_INTENT.
  *
@@ -522,6 +533,13 @@ function extractExplicitSkillInvocations(text: string): KeywordMatch[] {
 
 function hasIntentContextForKeyword(text: string, keyword: string): boolean {
   const k = keyword.toLowerCase();
+  if (
+    (k === 'deep interview' || k === 'interview')
+    && DEEP_INTERVIEW_MANAGEMENT_MENTION_PATTERN.test(text)
+    && !DEEP_INTERVIEW_ACTIVATION_PATTERNS.some((pattern) => pattern.test(text))
+  ) {
+    return false;
+  }
   if (!KEYWORDS_REQUIRING_INTENT.has(k)) return true;
   const patterns = KEYWORD_INTENT_PATTERNS[k as IntentKeyword];
   return patterns.some((pattern) => pattern.test(text));

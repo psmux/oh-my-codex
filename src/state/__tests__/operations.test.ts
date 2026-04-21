@@ -264,6 +264,64 @@ describe('state operations directory initialization', () => {
     }
   });
 
+  it('does not report a legacy root mode active after clearing the current session scope', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-state-ops-clear-root-fallback-'));
+    try {
+      const stateDir = join(wd, '.omx', 'state');
+      const sessionId = 'sess-clear';
+      const sessionDir = join(stateDir, 'sessions', sessionId);
+      await mkdir(sessionDir, { recursive: true });
+      await writeFile(join(stateDir, 'session.json'), JSON.stringify({ session_id: sessionId }, null, 2));
+      await writeFile(
+        join(stateDir, 'deep-interview-state.json'),
+        JSON.stringify({ active: true, mode: 'deep-interview', current_phase: 'legacy-root' }, null, 2),
+      );
+      await writeFile(
+        join(sessionDir, 'deep-interview-state.json'),
+        JSON.stringify({ active: true, mode: 'deep-interview', current_phase: 'session-active' }, null, 2),
+      );
+
+      await executeStateOperation('state_clear', {
+        workingDirectory: wd,
+        mode: 'deep-interview',
+      });
+
+      assert.equal(existsSync(join(sessionDir, 'deep-interview-state.json')), true);
+      assert.equal(existsSync(join(stateDir, 'deep-interview-state.json')), true);
+
+      const sessionState = JSON.parse(
+        await readFile(join(sessionDir, 'deep-interview-state.json'), 'utf-8'),
+      ) as Record<string, unknown>;
+      assert.equal(sessionState.active, false);
+      assert.equal(sessionState.current_phase, 'cleared');
+
+      const activeResponse = await executeStateOperation('state_list_active', {
+        workingDirectory: wd,
+      });
+      assert.deepEqual(activeResponse.payload, { active_modes: [] });
+
+      const statusResponse = await executeStateOperation('state_get_status', {
+        workingDirectory: wd,
+        mode: 'deep-interview',
+      });
+      const statuses = (statusResponse.payload as {
+        statuses?: Record<string, { active?: boolean; phase?: string }>;
+      }).statuses || {};
+      assert.equal(statuses['deep-interview']?.active, false);
+      assert.equal(statuses['deep-interview']?.phase, 'cleared');
+
+      const readResponse = await executeStateOperation('state_read', {
+        workingDirectory: wd,
+        mode: 'deep-interview',
+      });
+      const readBody = readResponse.payload as Record<string, unknown>;
+      assert.equal(readBody.active, false);
+      assert.equal(readBody.current_phase, 'cleared');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it('syncs canonical skill-active state for tracked mode writes and clears', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-state-ops-canonical-'));
     try {

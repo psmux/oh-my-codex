@@ -119,6 +119,23 @@ async function writeAtomicFile(path: string, data: string): Promise<void> {
 	}
 }
 
+async function writeClearedSessionScopedModeState(
+	path: string,
+	mode: string,
+	sessionId: string,
+): Promise<void> {
+	const nowIso = new Date().toISOString();
+	const clearedState = withModeRuntimeContext({}, {
+		mode,
+		active: false,
+		current_phase: "cleared",
+		updated_at: nowIso,
+		completed_at: nowIso,
+		session_id: sessionId,
+	});
+	await writeAtomicFile(path, JSON.stringify(clearedState, null, 2));
+}
+
 const server = new Server(
 	{ name: "omx-state", version: "0.1.0" },
 	{ capabilities: { tools: {} } },
@@ -522,7 +539,13 @@ export async function handleStateToolCall(request: {
 
 				if (!allSessions) {
 					const path = getStatePath(mode, cwd, effectiveSessionId);
-					if (existsSync(path)) {
+					if (
+						mode !== SKILL_ACTIVE_STATE_MODE &&
+						effectiveSessionId &&
+						existsSync(getStatePath(mode, cwd))
+					) {
+						await writeClearedSessionScopedModeState(path, mode, effectiveSessionId);
+					} else if (existsSync(path)) {
 						await unlink(path);
 					}
 					if (mode !== SKILL_ACTIVE_STATE_MODE) {

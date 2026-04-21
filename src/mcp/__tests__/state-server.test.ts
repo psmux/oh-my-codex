@@ -455,6 +455,70 @@ describe('state-server directory initialization', () => {
     }
   });
 
+  it('writes a session-scoped inactive tombstone when clearing a mode under an active session', async () => {
+    process.env.OMX_STATE_SERVER_DISABLE_AUTO_START = '1';
+    const { handleStateToolCall } = await import('../state-server.js');
+
+    const wd = await mkdtemp(join(tmpdir(), 'omx-state-server-clear-root-fallback-'));
+    try {
+      const stateDir = join(wd, '.omx', 'state');
+      const sessionId = 'sess-clear';
+      const sessionDir = join(stateDir, 'sessions', sessionId);
+      await mkdir(sessionDir, { recursive: true });
+      await writeFile(join(stateDir, 'session.json'), JSON.stringify({ session_id: sessionId }, null, 2));
+      await writeFile(
+        join(stateDir, 'deep-interview-state.json'),
+        JSON.stringify({ active: true, mode: 'deep-interview', current_phase: 'legacy-root' }, null, 2),
+      );
+      await writeFile(
+        join(sessionDir, 'deep-interview-state.json'),
+        JSON.stringify({ active: true, mode: 'deep-interview', current_phase: 'session-active' }, null, 2),
+      );
+
+      await handleStateToolCall({
+        params: {
+          name: 'state_clear',
+          arguments: {
+            workingDirectory: wd,
+            mode: 'deep-interview',
+          },
+        },
+      });
+
+      const sessionState = JSON.parse(
+        await readFile(join(sessionDir, 'deep-interview-state.json'), 'utf-8'),
+      ) as Record<string, unknown>;
+      assert.equal(sessionState.active, false);
+      assert.equal(sessionState.current_phase, 'cleared');
+      assert.equal(sessionState.session_id, sessionId);
+
+      const listResponse = await handleStateToolCall({
+        params: {
+          name: 'state_list_active',
+          arguments: {
+            workingDirectory: wd,
+          },
+        },
+      });
+      assert.deepEqual(JSON.parse(listResponse.content[0]?.text || '{}'), { active_modes: [] });
+
+      const readResponse = await handleStateToolCall({
+        params: {
+          name: 'state_read',
+          arguments: {
+            workingDirectory: wd,
+            mode: 'deep-interview',
+          },
+        },
+      });
+      const readBody = JSON.parse(readResponse.content[0]?.text || '{}') as Record<string, unknown>;
+      assert.equal(readBody.active, false);
+      assert.equal(readBody.current_phase, 'cleared');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it('allows approved overlaps and preserves the remaining canonical state on clear', async () => {
     process.env.OMX_STATE_SERVER_DISABLE_AUTO_START = '1';
     const { handleStateToolCall } = await import('../state-server.js');

@@ -177,6 +177,12 @@ describe('keyword detector swarm/team compatibility', () => {
     assert.equal(match.keyword.toLowerCase(), 'deep interview');
   });
 
+  it('does not trigger deep-interview from cleanup or state-management mentions', () => {
+    assert.equal(detectPrimaryKeyword('clear deep interview state before continuing'), null);
+    assert.equal(detectPrimaryKeyword('cleanup stale deep-interview state after session clear'), null);
+    assert.equal(detectPrimaryKeyword('remove the stale deep interview lock from .omx/state'), null);
+  });
+
   it('maps "gather requirements" to deep-interview skill', () => {
     const match = detectPrimaryKeyword('let us gather requirements first');
 
