@@ -631,6 +631,9 @@ function buildAdditionalContextMessage(
   const deepInterviewPromptActivationNote = skillState?.initialized_mode === "deep-interview"
     ? buildDeepInterviewQuestionBridgeInstruction(cwd, payload)
     : null;
+  const ultraworkPromptActivationNote = skillState?.initialized_mode === "ultrawork"
+    ? "Ultrawork protocol: ground the task before editing, define pass/fail acceptance criteria, keep shared-file work local, and use direct-tool plus background evidence lanes only for truly independent work. Direct ultrawork provides lightweight verification only; Ralph owns persistence and the full verified-completion promise."
+    : null;
   const combinedTransitionMessage = (() => {
     if (!skillState?.transition_message) return null;
     if (matches.length <= 1 || activeSkills.length <= 1) return skillState.transition_message;
@@ -681,6 +684,7 @@ function buildAdditionalContextMessage(
       promptPriorityMessage,
       initializedStateMessage,
       deepInterviewPromptActivationNote,
+      ultraworkPromptActivationNote,
       "Use the durable OMX team runtime via `omx team ...` for coordinated execution; do not replace it with in-process fanout.",
       "If you need runtime syntax, run `omx team --help` yourself.",
       "Follow AGENTS.md routing and preserve workflow transition and planning-safety rules.",
@@ -697,6 +701,7 @@ function buildAdditionalContextMessage(
       promptPriorityMessage,
       `skill: ${skillState.initialized_mode} activated and initial state initialized at ${skillState.initialized_state_path}; write subsequent updates via omx_state MCP.`,
       deepInterviewPromptActivationNote,
+      ultraworkPromptActivationNote,
       ralphPromptActivationNote,
       "Follow AGENTS.md routing and preserve workflow transition and planning-safety rules.",
     ].join(" ");

@@ -636,6 +636,37 @@ describe("codex native hook dispatch", () => {
     }
   });
 
+  it("adds ultrawork-specific activation guidance only for true ultrawork workflow activation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-ultrawork-routing-"));
+    try {
+      await mkdir(join(cwd, ".omx", "state"), { recursive: true });
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "UserPromptSubmit",
+          cwd,
+          session_id: "sess-ultrawork-msg",
+          thread_id: "thread-ultrawork-msg",
+          turn_id: "turn-ultrawork-msg",
+          prompt: "$ultrawork fan out the regression checks",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "keyword-detector");
+      assert.equal(result.skillState?.skill, "ultrawork");
+      const message = String(
+        (result.outputJson as { hookSpecificOutput?: { additionalContext?: string } })?.hookSpecificOutput?.additionalContext || "",
+      );
+      assert.match(message, /\$ultrawork" -> ultrawork/);
+      assert.match(message, /ground the task before editing/i);
+      assert.match(message, /define pass\/fail acceptance criteria/i);
+      assert.match(message, /direct-tool plus background evidence lanes/i);
+      assert.match(message, /Ralph owns persistence and the full verified-completion promise/i);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("does not activate Ralph workflow state from a plain conversational mention", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-ralph-plain-text-"));
     try {
