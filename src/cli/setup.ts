@@ -159,6 +159,8 @@ const PROJECT_GITIGNORE_ENTRIES = [
   "!.codex/prompts/**",
 ] as const;
 const LEGACY_PROJECT_GITIGNORE_ENTRIES = [".codex/"] as const;
+const HARD_DEPRECATED_SKILLS_TO_REMOVE = new Set(["web-clone"]);
+
 function applyScopePathRewritesToAgentsTemplate(
   content: string,
   scope: SetupScope,
@@ -1887,10 +1889,14 @@ export async function installSkills(
     }
   }
 
-  if (options.force && manifest && existsSync(dstDir)) {
+  if (manifest && existsSync(dstDir)) {
     for (const staleSkill of staleCandidateSkillNames) {
       const status = skillStatusByName?.get(staleSkill);
       if (isSetupInstallableSkill(staleSkill, status)) continue;
+
+      const shouldRemoveStaleSkill =
+        options.force || HARD_DEPRECATED_SKILLS_TO_REMOVE.has(staleSkill);
+      if (!shouldRemoveStaleSkill) continue;
 
       const staleSkillDir = join(dstDir, staleSkill);
       if (!existsSync(staleSkillDir)) continue;
