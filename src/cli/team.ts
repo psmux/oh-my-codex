@@ -153,6 +153,7 @@ Usage: omx team [N:agent-type] "<task description>"
 Notes:
   team workers use dedicated worktrees automatically by default.
   --worktree is deprecated for omx team and is now only a backward-compatible no-op override.
+  omx team is a tmux-runtime surface by default; in Codex App or plain outside-tmux sessions, launch OMX CLI from shell first instead of treating team as directly available.
   use native Codex subagents for small in-session fanout; use omx team for durable tmux/state/worktree coordination.
 
 Examples:

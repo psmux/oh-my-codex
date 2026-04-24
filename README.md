@@ -181,7 +181,7 @@ These are useful, but they are not the main onboarding path.
 
 ### Team runtime
 
-Use the team runtime when you specifically need durable tmux/worktree coordination, not as the default way to begin using OMX.
+Use the team runtime when you specifically need durable tmux/worktree coordination, not as the default way to begin using OMX. In Codex App or plain outside-tmux sessions, treat `omx team` as a tmux-runtime shell surface rather than a directly available in-app workflow; launch OMX CLI from shell first if you actually want team execution.
 
 ```bash
 omx team 3:executor "fix the failing tests with verification"

@@ -26,6 +26,17 @@ const EXPECTED_PROJECT_GITIGNORE = [
   "!.codex/prompts/**",
 ].join("\n") + "\n";
 
+const EXPECTED_PROJECT_GITIGNORE_WITHOUT_OMX = [
+  ".codex/*",
+  "!.codex/agents/",
+  "!.codex/agents/**",
+  "!.codex/skills/",
+  "!.codex/skills/**",
+  ".codex/skills/.system/**",
+  "!.codex/prompts/",
+  "!.codex/prompts/**",
+].join("\n") + "\n";
+
 async function runSetupWithCapturedLogs(
   cwd: string,
   options: Parameters<typeof setup>[0],
@@ -135,6 +146,41 @@ describe("omx setup refresh summary and dry-run behavior", () => {
       assert.equal(gitignore, `node_modules/\n${EXPECTED_PROJECT_GITIGNORE}`);
       assert.equal(gitignore.match(/^\.omx\/$/gm)?.length ?? 0, 1);
       assert.equal(gitignore.match(/^\.codex\/\*$/gm)?.length ?? 0, 1);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not add .omx/ to project .gitignore when Git already ignores it locally", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-setup-refresh-local-ignore-"));
+    try {
+      const initResult = spawnSync("git", ["init", "-q"], { cwd: wd });
+      assert.equal(initResult.status, 0);
+      await writeFile(join(wd, ".gitignore"), "node_modules/\n");
+      await writeFile(join(wd, ".git", "info", "exclude"), ".omx/\n");
+
+      await runSetupInTempDir(wd, { scope: "project" });
+
+      const gitignore = await readFile(join(wd, ".gitignore"), "utf-8");
+      assert.equal(gitignore, `node_modules/\n${EXPECTED_PROJECT_GITIGNORE_WITHOUT_OMX}`);
+      assert.equal(gitignore.match(/^\.omx\/$/gm)?.length ?? 0, 0);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("creates .gitignore without .omx/ when only local Git excludes already ignore it", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-setup-refresh-local-ignore-"));
+    try {
+      const initResult = spawnSync("git", ["init", "-q"], { cwd: wd });
+      assert.equal(initResult.status, 0);
+      await writeFile(join(wd, ".git", "info", "exclude"), ".omx/\n");
+
+      await runSetupInTempDir(wd, { scope: "project" });
+
+      const gitignore = await readFile(join(wd, ".gitignore"), "utf-8");
+      assert.equal(gitignore, EXPECTED_PROJECT_GITIGNORE_WITHOUT_OMX);
+      assert.equal(gitignore.match(/^\.omx\/$/gm)?.length ?? 0, 0);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }

@@ -1,10 +1,20 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { delimiter, join, relative, sep } from 'node:path';
 import { buildMergedConfig } from '../../config/generator.js';
 import type { CatalogManifest } from '../../catalog/schema.js';
 import { getSetupInstallableSkillNames } from '../../catalog/installable.js';
+import {
+  buildOmxPluginMcpManifest,
+  OMX_FIRST_PARTY_MCP_ENTRYPOINTS,
+  OMX_FIRST_PARTY_MCP_PLUGIN_TARGETS,
+  OMX_FIRST_PARTY_MCP_SERVER_NAMES,
+  OMX_PLUGIN_MCP_COMMAND,
+  OMX_PLUGIN_MCP_SERVE_SUBCOMMAND,
+} from '../../config/omx-first-party-mcp.js';
 
 type PackageJson = {
   version: string;
@@ -47,6 +57,7 @@ const pluginManifestPath = join(pluginRoot, '.codex-plugin', 'plugin.json');
 const pluginMcpPath = join(pluginRoot, '.mcp.json');
 const pluginAppsPath = join(pluginRoot, '.app.json');
 const marketplacePath = join(root, '.agents', 'plugins', 'marketplace.json');
+const omxBin = join(root, 'dist', 'cli', 'omx.js');
 
 type PluginMcpManifest = {
   mcpServers?: Record<string, {
@@ -64,7 +75,6 @@ async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, 'utf-8')) as T;
 }
 
-
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -78,6 +88,55 @@ async function listFiles(dir: string, base = dir): Promise<string[]> {
     return [];
   }));
   return files.flat().sort();
+}
+
+async function writeOmxShim(binDir: string): Promise<void> {
+  await mkdir(binDir, { recursive: true });
+
+  if (process.platform === 'win32') {
+    await writeFile(
+      join(binDir, 'omx.cmd'),
+      `@echo off\r\n"${process.execPath}" "${omxBin}" %*\r\n`,
+      'utf-8',
+    );
+    return;
+  }
+
+  const shimPath = join(binDir, 'omx');
+  await writeFile(
+    shimPath,
+    `#!/bin/sh\nexec "${process.execPath}" "${omxBin}" "$@"\n`,
+    'utf-8',
+  );
+  await chmod(shimPath, 0o755);
+}
+
+async function assertPluginCacheLaunchable(entrypoint: string): Promise<void> {
+  const cacheRoot = await mkdtemp(join(tmpdir(), 'omx-plugin-cache-'));
+  const cachePluginRoot = join(cacheRoot, pluginName, 'local');
+  const shimDir = join(cacheRoot, 'bin');
+  await cp(pluginRoot, cachePluginRoot, { recursive: true });
+  await writeOmxShim(shimDir);
+
+  try {
+    const result = spawnSync(OMX_PLUGIN_MCP_COMMAND, [OMX_PLUGIN_MCP_SERVE_SUBCOMMAND, entrypoint], {
+      cwd: cachePluginRoot,
+      encoding: 'utf-8',
+      input: '',
+      env: {
+        ...process.env,
+        PATH: `${shimDir}${delimiter}${process.env.PATH || ''}`,
+        OMX_AUTO_UPDATE: '0',
+        OMX_NOTIFY_FALLBACK: '0',
+        OMX_HOOK_DERIVED_SIGNALS: '0',
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.stderr.trim(), '', `${entrypoint} should not fail when launched from a cache-style plugin root`);
+  } finally {
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
 }
 
 describe('official Codex plugin layout', () => {
@@ -105,53 +164,25 @@ describe('official Codex plugin layout', () => {
       readJson<PluginMcpManifest>(pluginMcpPath),
       readJson<PluginAppsManifest>(pluginAppsPath),
     ]);
+    const expectedPluginMcpManifest = buildOmxPluginMcpManifest();
 
     const pluginManifest = await readJson<PluginManifest>(pluginManifestPath);
     assert.equal(pluginManifest.agents, undefined);
     assert.equal(pluginManifest.prompts, undefined);
     assert.equal(pluginManifest.hooks, undefined);
     assert.deepEqual(appsManifest, { apps: {} });
-
-    assert.deepEqual(
-      Object.keys(mcpManifest.mcpServers ?? {}).sort(),
-      ['omx_code_intel', 'omx_memory', 'omx_state', 'omx_trace', 'omx_wiki'],
-    );
-    assert.deepEqual(mcpManifest.mcpServers?.omx_state, {
-      command: 'node',
-      args: ['../../dist/mcp/state-server.js'],
-      enabled: true,
-    });
-    assert.deepEqual(mcpManifest.mcpServers?.omx_memory, {
-      command: 'node',
-      args: ['../../dist/mcp/memory-server.js'],
-      enabled: true,
-    });
-    assert.deepEqual(mcpManifest.mcpServers?.omx_code_intel, {
-      command: 'node',
-      args: ['../../dist/mcp/code-intel-server.js'],
-      enabled: true,
-    });
-    assert.deepEqual(mcpManifest.mcpServers?.omx_trace, {
-      command: 'node',
-      args: ['../../dist/mcp/trace-server.js'],
-      enabled: true,
-    });
-    assert.deepEqual(mcpManifest.mcpServers?.omx_wiki, {
-      command: 'node',
-      args: ['../../dist/mcp/wiki-server.js'],
-      enabled: true,
-    });
+    assert.deepEqual(mcpManifest, expectedPluginMcpManifest);
 
     for (const [serverName, server] of Object.entries(mcpManifest.mcpServers ?? {})) {
-      assert.equal(server.command, 'node', `${serverName} should run via node`);
+      assert.equal(server.command, OMX_PLUGIN_MCP_COMMAND, `${serverName} should run via omx`);
       assert.equal(server.enabled, true, `${serverName} should be enabled`);
-      assert.equal(server.args?.length, 1, `${serverName} should have a single entrypoint arg`);
-      const entrypoint = server.args?.[0];
-      assert.ok(entrypoint, `${serverName} should declare an entrypoint`);
-      assert.equal(entrypoint?.startsWith('../../dist/mcp/'), true, `${serverName} should point back to packaged dist/mcp assets`);
-      const resolvedEntrypoint = resolve(pluginRoot, entrypoint ?? '');
-      const entrypointStat = await stat(resolvedEntrypoint);
-      assert.equal(entrypointStat.isFile(), true, `${serverName} entrypoint should exist at ${resolvedEntrypoint}`);
+      assert.equal(server.args?.length, 2, `${serverName} should have serve subcommand + public target args`);
+      assert.equal(server.args?.[0], OMX_PLUGIN_MCP_SERVE_SUBCOMMAND, `${serverName} should launch through omx mcp-serve`);
+      const target = server.args?.[1];
+      assert.ok(target, `${serverName} should declare a public target`);
+      assert.equal(target?.includes('..'), false, `${serverName} should not depend on path traversal outside the plugin root`);
+      assert.equal(OMX_FIRST_PARTY_MCP_PLUGIN_TARGETS.includes(target ?? ''), true, `${serverName} should use a stable public OMX MCP target`);
+      assert.equal(target?.endsWith('-server.js'), false, `${serverName} should not expose internal dist filenames in plugin metadata`);
     }
   });
 
@@ -162,17 +193,41 @@ describe('official Codex plugin layout', () => {
       .map((match) => match[1])
       .sort();
 
+    assert.deepEqual(
+      setupManagedServers,
+      [...OMX_FIRST_PARTY_MCP_SERVER_NAMES].sort(),
+      'setup should expose the canonical first-party OMX MCP roster',
+    );
     assert.deepEqual(setupManagedServers, Object.keys(mcpManifest.mcpServers ?? {}).sort());
 
+    const targetToEntrypoint = new Map(
+      OMX_FIRST_PARTY_MCP_PLUGIN_TARGETS.map((target, index) => [target, OMX_FIRST_PARTY_MCP_ENTRYPOINTS[index]]),
+    );
+
     for (const [serverName, server] of Object.entries(mcpManifest.mcpServers ?? {})) {
-      const entrypoint = basename(server.args?.[0] ?? '');
-      assert.ok(entrypoint, `${serverName} should expose an entrypoint basename`);
+      const target = server.args?.[1] ?? '';
+      const entrypoint = targetToEntrypoint.get(target);
+      assert.ok(entrypoint, `${serverName} should expose a canonical public target`);
       assert.match(
         mergedConfig,
         new RegExp(`\\[mcp_servers\\.${escapeRegex(serverName)}\\][\\s\\S]*?${escapeRegex(entrypoint)}`),
         `${serverName} should stay aligned with the setup-managed MCP entrypoint`,
       );
     }
+  });
+
+  it('launches plugin MCP public targets from a cache-style plugin root via the installed omx CLI', async () => {
+    for (const target of OMX_FIRST_PARTY_MCP_PLUGIN_TARGETS) {
+      await assertPluginCacheLaunchable(target);
+    }
+  });
+
+  it('does not stage plugin-scoped hook manifests or runtime hook directories', async () => {
+    const pluginEntries = await readdir(pluginRoot);
+
+    assert.equal(pluginEntries.includes('.codex'), false, 'official plugin should not ship setup-owned .codex hook assets');
+    assert.equal(pluginEntries.includes('.omx'), false, 'official plugin should not ship runtime hook directories');
+    assert.equal(pluginEntries.includes('hooks.json'), false, 'official plugin should not ship a plugin-scoped hooks manifest');
   });
 
   it('registers the plugin in the repo marketplace with explicit source, policy, and category', async () => {

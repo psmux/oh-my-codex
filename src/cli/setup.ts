@@ -797,6 +797,25 @@ function hasGitignoreEntry(content: string, entry: string): boolean {
     .some((line) => line === entry);
 }
 
+function isProjectPathIgnoredByGit(projectRoot: string, path: string): boolean {
+  const result = spawnSync("git", ["check-ignore", "--no-index", "-q", path], {
+    cwd: projectRoot,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  return result.status === 0;
+}
+
+function shouldAddProjectGitignoreEntry(projectRoot: string, content: string, entry: string): boolean {
+  if (hasGitignoreEntry(content, entry)) return false;
+
+  if (entry === ".omx/" && isProjectPathIgnoredByGit(projectRoot, entry)) {
+    return false;
+  }
+
+  return true;
+}
+
 function stripLegacyGitignoreEntries(
   content: string,
   legacyEntries: readonly string[],
@@ -827,8 +846,8 @@ async function ensureProjectGitignore(
     LEGACY_PROJECT_GITIGNORE_ENTRIES,
   );
 
-  const missingEntries = PROJECT_GITIGNORE_ENTRIES.filter(
-    (entry) => !hasGitignoreEntry(normalized.content, entry),
+  const missingEntries = PROJECT_GITIGNORE_ENTRIES.filter((entry) =>
+    shouldAddProjectGitignoreEntry(projectRoot, normalized.content, entry),
   );
 
   if (missingEntries.length === 0 && !normalized.removed) {
@@ -837,7 +856,7 @@ async function ensureProjectGitignore(
 
   const nextContent = destinationExists
     ? `${normalized.content}${normalized.content.endsWith("\n") || normalized.content.length === 0 ? "" : "\n"}${missingEntries.join("\n")}${missingEntries.length > 0 ? "\n" : ""}`
-    : `${PROJECT_GITIGNORE_ENTRIES.join("\n")}\n`;
+    : `${missingEntries.join("\n")}\n`;
 
   if (
     await ensureBackup(gitignorePath, destinationExists, backupContext, options)

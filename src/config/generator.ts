@@ -17,6 +17,7 @@ import TOML from "@iarna/toml";
 import { AGENT_DEFINITIONS } from "../agents/definitions.js";
 import { DEFAULT_FRONTIER_MODEL } from "./models.js";
 import type { UnifiedMcpRegistryServer } from "./mcp-registry.js";
+import { getOmxFirstPartySetupMcpServers } from "./omx-first-party-mcp.js";
 
 interface MergeOptions {
   includeTui?: boolean;
@@ -957,63 +958,31 @@ function getSharedMcpRegistryBlock(
  * Contains ONLY [table] sections — no bare keys.
  */
 function getOmxTablesBlock(pkgRoot: string, includeTui = true): string {
-  const stateServerPath = escapeTomlString(
-    join(pkgRoot, "dist", "mcp", "state-server.js"),
-  );
-  const memoryServerPath = escapeTomlString(
-    join(pkgRoot, "dist", "mcp", "memory-server.js"),
-  );
-  const codeIntelServerPath = escapeTomlString(
-    join(pkgRoot, "dist", "mcp", "code-intel-server.js"),
-  );
-  const traceServerPath = escapeTomlString(
-    join(pkgRoot, "dist", "mcp", "trace-server.js"),
-  );
-  const wikiServerPath = escapeTomlString(
-    join(pkgRoot, "dist", "mcp", "wiki-server.js"),
-  );
-
-  return [
+  const lines = [
     "",
     "# ============================================================",
     "# oh-my-codex (OMX) Configuration",
     "# Managed by omx setup - manual edits preserved on next setup",
     "# ============================================================",
-    "",
-    "# OMX State Management MCP Server",
-    "[mcp_servers.omx_state]",
-    'command = "node"',
-    `args = ["${stateServerPath}"]`,
-    "enabled = true",
-    "startup_timeout_sec = 5",
-    "",
-    "# OMX Project Memory MCP Server",
-    "[mcp_servers.omx_memory]",
-    'command = "node"',
-    `args = ["${memoryServerPath}"]`,
-    "enabled = true",
-    "startup_timeout_sec = 5",
-    "",
-    "# OMX Code Intelligence MCP Server (LSP diagnostics, AST search)",
-    "[mcp_servers.omx_code_intel]",
-    'command = "node"',
-    `args = ["${codeIntelServerPath}"]`,
-    "enabled = true",
-    "startup_timeout_sec = 10",
-    "",
-    "# OMX Trace MCP Server (agent flow timeline & statistics)",
-    "[mcp_servers.omx_trace]",
-    'command = "node"',
-    `args = ["${traceServerPath}"]`,
-    "enabled = true",
-    "startup_timeout_sec = 5",
-    "",
-    "# OMX Wiki MCP Server (persistent project knowledge base)",
-    "[mcp_servers.omx_wiki]",
-    'command = "node"',
-    `args = ["${wikiServerPath}"]`,
-    "enabled = true",
-    "startup_timeout_sec = 5",
+  ];
+
+  for (const server of getOmxFirstPartySetupMcpServers(pkgRoot)) {
+    lines.push("");
+    lines.push(server.title);
+    lines.push(`[mcp_servers.${server.name}]`);
+    lines.push('command = "node"');
+    lines.push(
+      `args = [${server.args
+        .map((arg) => `"${escapeTomlString(arg)}"`)
+        .join(", ")}]`,
+    );
+    lines.push(`enabled = ${server.enabled ? "true" : "false"}`);
+    if (typeof server.startupTimeoutSec === "number") {
+      lines.push(`startup_timeout_sec = ${server.startupTimeoutSec}`);
+    }
+  }
+
+  lines.push(
     ...(includeTui
       ? [
           "",
@@ -1022,11 +991,12 @@ function getOmxTablesBlock(pkgRoot: string, includeTui = true): string {
           OMX_TUI_STATUS_LINE,
           "",
         ]
-      : []),
-    "# ============================================================",
-    "# End oh-my-codex",
-    "",
-  ].join("\n");
+      : [""]),
+  );
+  lines.push("# ============================================================");
+  lines.push("# End oh-my-codex");
+  lines.push("");
+  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------

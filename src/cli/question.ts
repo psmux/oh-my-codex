@@ -105,6 +105,17 @@ function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function createJsonSafeInlineQuestionOutput(): { isTTY?: boolean; write(chunk: string): boolean } {
+  return {
+    get isTTY() {
+      return process.stdout.isTTY;
+    },
+    write(chunk: string): boolean {
+      return process.stderr.write(chunk);
+    },
+  };
+}
+
 export async function questionCommand(args: string[]): Promise<void> {
   const parsed = parseQuestionArgs(args);
   if (parsed.help || args.length === 0) {
@@ -153,7 +164,10 @@ export async function questionCommand(args: string[]): Promise<void> {
     });
     await markQuestionPrompting(recordPath, renderer);
     if (renderer.renderer === 'inline-tty') {
-      await runQuestionUi(recordPath);
+      await runQuestionUi(
+        recordPath,
+        parsed.json ? { output: createJsonSafeInlineQuestionOutput() } : {},
+      );
     }
     finalRecord = await waitForQuestionTerminalState(recordPath);
   } catch (error) {

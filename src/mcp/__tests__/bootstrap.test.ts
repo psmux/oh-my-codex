@@ -4,9 +4,11 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   analyzeDuplicateSiblingState,
+  MCP_ENTRYPOINT_MARKER_ENV,
   extractMcpEntrypointMarker,
   isParentProcessAlive,
   parseProcessTable,
+  resolveCurrentMcpEntrypointMarker,
   shouldAutoStartMcpServer,
   shouldSelfExitForDuplicateSibling,
   type McpServerName,
@@ -135,7 +137,33 @@ describe('mcp duplicate sibling detection', () => {
       extractMcpEntrypointMarker('node C:\\\\tmp\\\\oh-my-codex\\\\dist\\\\mcp\\\\trace-server.ts'),
       'trace-server.ts',
     );
+    assert.equal(
+      extractMcpEntrypointMarker('node /tmp/dist/cli/omx.js mcp-serve state'),
+      'state-server.js',
+    );
+    assert.equal(
+      extractMcpEntrypointMarker('node /tmp/dist/cli/omx.js mcp-serve code-intel'),
+      'code-intel-server.js',
+    );
     assert.equal(extractMcpEntrypointMarker('node something-else.js'), null);
+  });
+
+
+  it('prefers an explicit MCP entrypoint marker over argv[1]', () => {
+    assert.equal(
+      resolveCurrentMcpEntrypointMarker(
+        { [MCP_ENTRYPOINT_MARKER_ENV]: 'trace-server.js' },
+        '/repo/dist/cli/omx.js',
+      ),
+      'trace-server.js',
+    );
+  });
+
+  it('falls back to argv[1] when no explicit MCP entrypoint marker is set', () => {
+    assert.equal(
+      resolveCurrentMcpEntrypointMarker({}, '/repo/dist/mcp/state-server.js'),
+      'state-server.js',
+    );
   });
 
   it('parses ps output into process table entries', () => {
@@ -172,6 +200,34 @@ describe('mcp duplicate sibling detection', () => {
     const newest = analyzeDuplicateSiblingState(processes, 140, 55, 'state-server.js');
 
     assert.equal(older.status, 'older_duplicate');
+    assert.deepEqual(older.newerSiblingPids, [140]);
+    assert.equal(newest.status, 'newest');
+    assert.deepEqual(newest.newerSiblingPids, []);
+  });
+
+
+  it('detects duplicate plugin-launched mcp-serve public-target siblings', () => {
+    const processes = [
+      { pid: 101, ppid: 55, command: 'node /repo/dist/cli/omx.js mcp-serve state' },
+      { pid: 140, ppid: 55, command: 'node /repo/dist/cli/omx.js mcp-serve state' },
+      { pid: 160, ppid: 55, command: 'node /repo/dist/cli/omx.js mcp-serve memory' },
+    ];
+
+    const older = analyzeDuplicateSiblingState(
+      processes,
+      101,
+      55,
+      'state-server.js',
+    );
+    const newest = analyzeDuplicateSiblingState(
+      processes,
+      140,
+      55,
+      'state-server.js',
+    );
+
+    assert.equal(older.status, 'older_duplicate');
+    assert.deepEqual(older.matchingPids, [101, 140]);
     assert.deepEqual(older.newerSiblingPids, [140]);
     assert.equal(newest.status, 'newest');
     assert.deepEqual(newest.newerSiblingPids, []);

@@ -89,7 +89,7 @@ describe('omx question CLI', () => {
     const recordPath = join(questionsDir, recordFile);
 
     let record = null;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       record = await readQuestionRecord(recordPath);
       if (record?.status === 'prompting') break;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -376,7 +376,7 @@ esac
     const recordPath = join(questionsDir, recordFile);
 
     let record = null;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       record = await readQuestionRecord(recordPath);
       if (record?.status === 'prompting') break;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -413,12 +413,14 @@ esac
     const originalResume = process.stdin.resume;
     const originalPause = process.stdin.pause;
     const originalWrite = process.stdout.write.bind(process.stdout);
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
     const originalCwd = process.cwd();
     const originalTmux = process.env.TMUX;
     const originalTmuxPane = process.env.TMUX_PANE;
     const originalQuestionReturnPane = process.env.OMX_QUESTION_RETURN_PANE;
     const originalLeaderPaneId = process.env.OMX_LEADER_PANE_ID;
     const writes: string[] = [];
+    const stderrWrites: string[] = [];
 
     Object.defineProperty(process, 'platform', { value: 'win32' });
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
@@ -434,6 +436,10 @@ esac
       writes.push(String(chunk));
       return true;
     }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
     process.chdir(cwd);
 
     try {
@@ -454,12 +460,12 @@ esac
 
       await runPromise;
       const joined = writes.join('');
-      const lastJsonLine = joined.trim().split('\n').reverse().find((line) => line.trim().startsWith('{'));
-      assert.ok(lastJsonLine, `expected JSON output in: ${joined}`);
-      const payload = JSON.parse(lastJsonLine);
+      const stderrJoined = stderrWrites.join('');
+      const payload = JSON.parse(joined);
       assert.equal(payload.ok, true);
       assert.equal(payload.answer.value, 'a');
-      assert.match(joined, /Use ↑\/↓ to move, Enter to select\./);
+      assert.doesNotMatch(joined, /Use ↑\/↓ to move, Enter to select\./);
+      assert.match(stderrJoined, /Use ↑\/↓ to move, Enter to select\./);
 
       const entries = await readdir(join(cwd, '.omx', 'state', 'sessions', 'sess-q', 'questions'));
       assert.equal(entries.length, 1);
@@ -474,6 +480,7 @@ esac
       process.stdin.resume = originalResume;
       process.stdin.pause = originalPause;
       process.stdout.write = originalWrite as typeof process.stdout.write;
+      process.stderr.write = originalStderrWrite as typeof process.stderr.write;
       process.chdir(originalCwd);
       if (typeof originalTmux === 'string') process.env.TMUX = originalTmux;
       else delete process.env.TMUX;

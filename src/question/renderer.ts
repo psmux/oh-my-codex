@@ -286,7 +286,7 @@ export function launchQuestionRenderer(
 
   if (strategy === 'unsupported') {
     throw new Error(
-      'omx question cannot open a visible renderer because this process is not running inside an attached tmux pane. Run omx question from inside tmux.',
+      'omx question cannot open a visible renderer because this process is outside an attached tmux pane and has no explicit tmux return bridge. Codex App/outside-tmux sessions need an attached tmux OMX CLI session or OMX_QUESTION_RETURN_PANE bridge. Run omx question from inside tmux.',
     );
   }
 

@@ -67,9 +67,13 @@ describe('package bin contract', () => {
       pkg.scripts?.['test:ralph-persistence:compiled'],
       'node --test dist/cli/__tests__/session-scoped-runtime.test.js dist/mcp/__tests__/trace-server.test.js dist/hud/__tests__/state.test.js dist/mcp/__tests__/state-server-ralph-phase.test.js dist/ralph/__tests__/persistence.test.js dist/verification/__tests__/ralph-persistence-gate.test.js',
     );
+    assert.equal(
+      pkg.scripts?.['test:plugin-boundaries:compiled'],
+      'node --test dist/cli/__tests__/codex-plugin-layout.test.js dist/cli/__tests__/package-bin-contract.test.js dist/cli/__tests__/setup-hooks-shared-ownership.test.js',
+    );
     assert.equal(pkg.scripts?.['test:compat:node'], 'npm run build && node dist/scripts/run-test-files.js dist/compat/__tests__');
 
-    for (const scriptName of ['test:node', 'test:ci:compiled', 'coverage:team-critical', 'coverage:team-critical:compiled', 'coverage:ts:full', 'coverage:ts:full:compiled', 'test:ralph-persistence:compiled', 'test:compat:node'] as const) {
+    for (const scriptName of ['test:node', 'test:ci:compiled', 'coverage:team-critical', 'coverage:team-critical:compiled', 'coverage:ts:full', 'coverage:ts:full:compiled', 'test:ralph-persistence:compiled', 'test:plugin-boundaries:compiled', 'test:compat:node'] as const) {
       const script: string | undefined = pkg.scripts?.[scriptName];
       assert.ok(script, `expected ${scriptName} to exist`);
       assert.equal(script.includes('$(find '), false, `${scriptName} should not rely on POSIX command substitution`);
@@ -133,6 +137,11 @@ describe('package bin contract', () => {
     const promptEntry = results[0]?.files?.find((file) => file.path === 'prompts/executor.md');
     const templateEntry = results[0]?.files?.find((file) => file.path === 'templates/AGENTS.md');
     const postinstallEntry = results[0]?.files?.find((file) => file.path === 'src/scripts/postinstall-bootstrap.js');
+    const pluginScopedHooksEntry = results[0]?.files?.find((file) =>
+      file.path === 'plugins/oh-my-codex/hooks.json'
+      || file.path === 'plugins/oh-my-codex/.codex/hooks.json'
+      || file.path === 'plugins/oh-my-codex/.codex-plugin/hooks.json'
+      || file.path.startsWith('plugins/oh-my-codex/.omx/hooks/'));
 
     assert.equal(packagedHarnessEntry, undefined, `did not expect ${packagedHarnessPath} in npm pack output`);
     assert.equal(packagedHarnessMetaEntry, undefined, 'did not expect packaged explore harness metadata in npm pack output');
@@ -145,16 +154,17 @@ describe('package bin contract', () => {
     assert.ok(pluginManifestEntry, 'expected npm pack output to include plugins/oh-my-codex/.codex-plugin/plugin.json');
     assert.ok(pluginMcpEntry, 'expected npm pack output to include plugins/oh-my-codex/.mcp.json');
     assert.ok(pluginAppsEntry, 'expected npm pack output to include plugins/oh-my-codex/.app.json');
-    assert.ok(stateServerEntry, 'expected npm pack output to include dist/mcp/state-server.js for plugin MCP metadata');
-    assert.ok(memoryServerEntry, 'expected npm pack output to include dist/mcp/memory-server.js for plugin MCP metadata');
-    assert.ok(codeIntelServerEntry, 'expected npm pack output to include dist/mcp/code-intel-server.js for plugin MCP metadata');
-    assert.ok(traceServerEntry, 'expected npm pack output to include dist/mcp/trace-server.js for plugin MCP metadata');
-    assert.ok(wikiServerEntry, 'expected npm pack output to include dist/mcp/wiki-server.js for plugin MCP metadata');
+    assert.ok(stateServerEntry, 'expected npm pack output to include dist/mcp/state-server.js for omx mcp-serve');
+    assert.ok(memoryServerEntry, 'expected npm pack output to include dist/mcp/memory-server.js for omx mcp-serve');
+    assert.ok(codeIntelServerEntry, 'expected npm pack output to include dist/mcp/code-intel-server.js for omx mcp-serve');
+    assert.ok(traceServerEntry, 'expected npm pack output to include dist/mcp/trace-server.js for omx mcp-serve');
+    assert.ok(wikiServerEntry, 'expected npm pack output to include dist/mcp/wiki-server.js for omx mcp-serve');
     assert.ok(pluginRalphSkillEntry, 'expected npm pack output to include mirrored plugin ralph skill');
     assert.ok(pluginWorkerSkillEntry, 'expected npm pack output to include mirrored plugin worker skill');
     assert.ok(rootRalphSkillEntry, 'expected npm pack output to keep canonical root skills');
     assert.ok(promptEntry, 'expected npm pack output to keep prompts');
     assert.ok(templateEntry, 'expected npm pack output to keep templates');
     assert.ok(postinstallEntry, 'expected npm pack output to keep postinstall bootstrap script');
+    assert.equal(pluginScopedHooksEntry, undefined, 'did not expect setup-owned hook assets inside the installable plugin bundle');
   });
 });

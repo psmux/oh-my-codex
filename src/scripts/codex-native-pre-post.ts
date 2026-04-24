@@ -2,6 +2,7 @@ import {
   buildDocumentRefreshAdvisoryOutput,
   evaluateStagedDocumentRefresh,
 } from "../document-refresh/enforcer.js";
+import { resolveCodexExecutionSurface } from "./codex-execution-surface.js";
 
 type CodexHookPayload = Record<string, unknown>;
 
@@ -50,6 +51,16 @@ function safeObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function isNativeOutsideTmuxSurface(payload: CodexHookPayload): boolean {
+  const cwd = safeString(payload.cwd).trim() || process.cwd();
+  const surface = resolveCodexExecutionSurface(cwd, {
+    hookEventName: "PreToolUse",
+    payload,
+    nativeSessionId: safeString(payload.session_id ?? payload.sessionId).trim(),
+  });
+  return surface.launcher === "native" && surface.transport === "outside-tmux";
 }
 
 function tryParseJsonString(value: unknown): Record<string, unknown> | null {
@@ -628,13 +639,77 @@ function isQuestionReturnPaneAssignment(token: string): boolean {
   return /^%\d+$/.test(value) || /^\$\{?TMUX_PANE\}?$/.test(value);
 }
 
+function hasInheritedQuestionReturnPaneBridge(): boolean {
+  // Intentionally trust only the explicit bridge envs that question renderer
+  // already accepts outside tmux; TMUX_PANE alone is not stable across all
+  // Bash/background-terminal tool paths that this enforcement protects.
+  const explicitPane = safeString(
+    process.env.OMX_QUESTION_RETURN_PANE || process.env.OMX_LEADER_PANE_ID,
+  ).trim();
+  return /^%\d+$/.test(explicitPane);
+}
+
 function commandHasQuestionReturnPane(command: string): boolean {
+  if (hasInheritedQuestionReturnPaneBridge()) return true;
   return (tokenizeShellCommand(command) ?? []).some(isQuestionReturnPaneAssignment);
 }
 
-function buildOmxQuestionPreToolUseEnforcementOutput(command: string): Record<string, unknown> | null {
+function commandInvokesOmxTeam(command: string): boolean {
+  const tokens = tokenizeShellCommand(command)?.map((token) => token.toLowerCase()) ?? [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const rawToken = tokens[index] || '';
+    const token = rawToken.replace(/\\/g, '/').split('/').pop() || '';
+    if ((token === 'omx' || token === 'omx.js') && tokens[index + 1] === 'team') return true;
+    if ((token === 'node' || token === 'node.exe') && /(?:^|\/)omx\.js$/.test(tokens[index + 1] || '') && tokens[index + 2] === 'team') return true;
+  }
+  return /\bomx\s+team\b/i.test(command) || /\bomx\.js['"]?\s+team\b/i.test(command);
+}
+
+function buildNativeOmxTeamPreToolUseEnforcementOutput(
+  command: string,
+  payload: CodexHookPayload,
+): Record<string, unknown> | null {
+  if (!isNativeOutsideTmuxSurface(payload) || !commandInvokesOmxTeam(command)) return null;
+
+  return {
+    decision: "block",
+    reason: "omx team cannot be launched directly from Codex App/native outside-tmux Bash sessions.",
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      additionalContext: [
+        "native/App omx team runtime enforcement triggered.",
+        "This session is outside tmux, so the durable tmux/worktree OMX team runtime is not directly available from Codex App/native Bash.",
+        "Launch OMX CLI from an attached tmux shell first, then run `omx team ...` there.",
+        `Original command: ${command}`,
+      ].join("\n"),
+    },
+    systemMessage: "omx team is blocked from Bash in Codex App/native outside-tmux sessions; launch OMX CLI from an attached tmux shell first.",
+  };
+}
+
+function buildOmxQuestionPreToolUseEnforcementOutput(
+  command: string,
+  payload: CodexHookPayload,
+): Record<string, unknown> | null {
   if (!commandInvokesOmxQuestion(command)) return null;
   if (commandHasQuestionReturnPane(command)) return null;
+
+  if (isNativeOutsideTmuxSurface(payload)) {
+    return {
+      decision: "block",
+      reason: "omx question cannot be launched directly from Codex App/native outside-tmux Bash sessions unless the command preserves a tmux return bridge.",
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        additionalContext: [
+          "native/App omx question bridge enforcement triggered.",
+          "This session is outside tmux, so `omx question` needs an attached tmux return bridge before Bash can launch it safely.",
+          "Prefix the Bash command with `OMX_QUESTION_RETURN_PANE=$TMUX_PANE` (or a concrete `%pane` value) from an attached tmux OMX CLI shell.",
+          `Original command: ${command}`,
+        ].join("\n"),
+      },
+      systemMessage: "omx question is blocked from Codex App/native outside-tmux Bash until the command preserves `OMX_QUESTION_RETURN_PANE=$TMUX_PANE` or an explicit `%pane` value.",
+    };
+  }
 
   return {
     decision: "block",
@@ -658,7 +733,9 @@ export function buildNativePreToolUseOutput(
   if (!normalized.isBash) return null;
   const gitCommitEnforcement = buildGitCommitEnforcementOutput(normalized.normalizedCommand);
   if (gitCommitEnforcement) return gitCommitEnforcement;
-  const questionEnforcement = buildOmxQuestionPreToolUseEnforcementOutput(normalized.normalizedCommand);
+  const teamEnforcement = buildNativeOmxTeamPreToolUseEnforcementOutput(normalized.normalizedCommand, payload);
+  if (teamEnforcement) return teamEnforcement;
+  const questionEnforcement = buildOmxQuestionPreToolUseEnforcementOutput(normalized.normalizedCommand, payload);
   if (questionEnforcement) return questionEnforcement;
   const documentRefreshWarning = buildDocumentRefreshPreToolUseOutput(
     normalized.normalizedCommand,
