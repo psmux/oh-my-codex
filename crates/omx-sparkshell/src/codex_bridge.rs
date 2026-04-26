@@ -286,6 +286,7 @@ fn render_section(name: &str, entries: &[String]) -> String {
 }
 
 #[cfg(test)]
+#[allow(unused_unsafe)]
 mod tests {
     use super::{
         normalize_summary, read_summary_timeout_ms, resolve_fallback_model,

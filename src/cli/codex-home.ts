@@ -1,7 +1,12 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { codexConfigPath } from "../utils/paths.js";
-import { SETUP_SCOPES, type SetupScope } from "./setup.js";
+import {
+  SETUP_INSTALL_MODES,
+  SETUP_SCOPES,
+  type SetupInstallMode,
+  type SetupScope,
+} from "./setup.js";
 
 /**
  * Legacy scope values that may appear in persisted setup-scope.json files.
@@ -18,20 +23,27 @@ export function readPersistedSetupScope(cwd: string): SetupScope | undefined {
 
 export function readPersistedSetupPreferences(
   cwd: string,
-): Partial<{ scope: SetupScope }> | undefined {
+): Partial<{ scope: SetupScope; installMode: SetupInstallMode }> | undefined {
   const scopePath = join(cwd, ".omx", "setup-scope.json");
   if (!existsSync(scopePath)) return undefined;
   try {
     const parsed = JSON.parse(readFileSync(scopePath, "utf-8")) as Partial<{
       scope: string;
+      installMode: string;
     }>;
-    const persisted: Partial<{ scope: SetupScope }> = {};
+    const persisted: Partial<{ scope: SetupScope; installMode: SetupInstallMode }> = {};
     if (typeof parsed.scope === "string") {
       if (SETUP_SCOPES.includes(parsed.scope as SetupScope)) {
         persisted.scope = parsed.scope as SetupScope;
       }
       const migrated = LEGACY_SCOPE_MIGRATION_SYNC[parsed.scope];
       if (migrated) persisted.scope = migrated;
+    }
+    if (
+      typeof parsed.installMode === "string"
+      && SETUP_INSTALL_MODES.includes(parsed.installMode as SetupInstallMode)
+    ) {
+      persisted.installMode = parsed.installMode as SetupInstallMode;
     }
     return Object.keys(persisted).length > 0 ? persisted : undefined;
   } catch (err) {

@@ -1,6 +1,7 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import { stdin as processStdin, stdout as processStdout } from 'node:process';
 import { parsePaneIdFromTmuxOutput } from '../hud/tmux.js';
 import { buildSendPaneArgvs } from '../notifications/tmux-detector.js';
 import { sleepSync } from '../utils/sleep.js';
@@ -12,7 +13,7 @@ import { resolveTmuxBinaryForPlatform } from '../utils/platform-command.js';
 import { resolveOmxCliEntryPath } from '../utils/paths.js';
 import type { QuestionAnswer, QuestionRendererState } from './types.js';
 
-export type QuestionRendererStrategy = 'inside-tmux' | 'detached-tmux' | 'test-noop' | 'unsupported';
+export type QuestionRendererStrategy = 'inside-tmux' | 'detached-tmux' | 'inline-tty' | 'windows-console' | 'test-noop' | 'unsupported';
 
 export interface LaunchQuestionRendererOptions {
   cwd: string;
@@ -20,10 +21,14 @@ export interface LaunchQuestionRendererOptions {
   sessionId?: string;
   env?: NodeJS.ProcessEnv;
   nowIso?: string;
+  platform?: NodeJS.Platform;
+  stdinIsTTY?: boolean;
+  stdoutIsTTY?: boolean;
 }
 
 export type ExecTmuxSync = (args: string[]) => string;
 export type SleepSync = (ms: number) => void;
+export type SpawnDetachedRenderer = (command: string, args: string[], options: SpawnOptions) => Pick<ChildProcess, 'pid' | 'unref'>;
 
 const QUESTION_TEXT_SETTLE_MS = 120;
 const QUESTION_SUBMIT_REPEAT_DELAY_MS = 100;
@@ -42,6 +47,26 @@ function hasExplicitQuestionPaneTarget(env: NodeJS.ProcessEnv): boolean {
   return isPaneId(safeString(env.OMX_QUESTION_RETURN_PANE || env.OMX_LEADER_PANE_ID).trim());
 }
 
+function hasInteractiveQuestionTty(options?: {
+  stdinIsTTY?: boolean;
+  stdoutIsTTY?: boolean;
+}): boolean {
+  const stdinIsTTY = options?.stdinIsTTY ?? Boolean(processStdin.isTTY);
+  const stdoutIsTTY = options?.stdoutIsTTY ?? Boolean(processStdout.isTTY);
+  return stdinIsTTY && stdoutIsTTY;
+}
+
+function hasWindowsPsmuxReturnBridge(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform !== 'win32') return false;
+  if (hasExplicitQuestionPaneTarget(env)) return true;
+  const tmux = safeString(env.TMUX).trim().toLowerCase();
+  const tmuxPane = safeString(env.TMUX_PANE).trim();
+  return tmux !== '' && (tmux.includes('psmux') || isPaneId(tmuxPane));
+}
+
 export function resolveQuestionRendererStrategy(
   env: NodeJS.ProcessEnv = process.env,
   // Kept for callers/tests that used to pass detected tmux availability; default
@@ -50,13 +75,37 @@ export function resolveQuestionRendererStrategy(
   options?: {
     cwd?: string;
     sessionId?: string;
+    platform?: NodeJS.Platform;
+    stdinIsTTY?: boolean;
+    stdoutIsTTY?: boolean;
   },
 ): QuestionRendererStrategy {
+  const platform = options?.platform ?? process.platform;
   if (safeString(env.OMX_QUESTION_TEST_RENDERER).trim() === 'noop') return 'test-noop';
+  if (hasWindowsPsmuxReturnBridge(env, platform)) return 'windows-console';
   if (safeString(env.TMUX).trim() !== '') return 'inside-tmux';
   if (hasExplicitQuestionPaneTarget(env)) return 'inside-tmux';
   if (options?.cwd && readPersistedQuestionReturnTarget(options.cwd, options.sessionId)) return 'inside-tmux';
+  if (platform === 'win32' && hasInteractiveQuestionTty(options)) {
+    return 'inline-tty';
+  }
   return 'unsupported';
+}
+
+function resolveQuestionUiProcessArgs(
+  recordPath: string,
+  options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+  },
+): string[] {
+  const omxBin = resolveOmxCliEntryPath({
+    argv1: process.argv[1],
+    cwd: options.cwd,
+    env: options.env,
+  }) || process.argv[1];
+  if (!omxBin) throw new Error('Unable to resolve OMX CLI entry path for question UI launch.');
+  return [omxBin, 'question', '--ui', '--state-path', recordPath];
 }
 
 function buildQuestionUiTmuxArgs(
@@ -68,12 +117,6 @@ function buildQuestionUiTmuxArgs(
     returnTarget?: string;
   },
 ): string[] {
-  const omxBin = resolveOmxCliEntryPath({
-    argv1: process.argv[1],
-    cwd: options.cwd,
-    env: options.env,
-  }) || process.argv[1];
-  if (!omxBin) throw new Error('Unable to resolve OMX CLI entry path for question UI launch.');
   return [
     ...(options.sessionId ? ['-e', `OMX_SESSION_ID=${options.sessionId}`] : []),
     ...(options.returnTarget ? [
@@ -83,12 +126,43 @@ function buildQuestionUiTmuxArgs(
       'OMX_QUESTION_RETURN_TRANSPORT=tmux-send-keys',
     ] : []),
     process.execPath,
-    omxBin,
-    'question',
-    '--ui',
-    '--state-path',
-    recordPath,
+    ...resolveQuestionUiProcessArgs(recordPath, options),
   ];
+}
+
+function buildQuestionUiProcessEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  options: {
+    sessionId?: string;
+    returnTarget?: string;
+  },
+): NodeJS.ProcessEnv {
+  return {
+    ...baseEnv,
+    ...(options.sessionId ? { OMX_SESSION_ID: options.sessionId } : {}),
+    ...(options.returnTarget ? {
+      OMX_QUESTION_RETURN_TARGET: options.returnTarget,
+      OMX_QUESTION_RETURN_TRANSPORT: 'tmux-send-keys',
+    } : {}),
+  };
+}
+
+function quoteCmdArg(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function buildWindowsConsoleStartCommand(command: string, args: string[]): string {
+  return [
+    'start',
+    '"OMX Question"',
+    '/wait',
+    quoteCmdArg(command),
+    ...args.map(quoteCmdArg),
+  ].join(' ');
+}
+
+function defaultSpawnDetachedRenderer(command: string, args: string[], options: SpawnOptions): Pick<ChildProcess, 'pid' | 'unref'> {
+  return spawn(command, args, options);
 }
 
 function defaultExecTmux(args: string[]): string {
@@ -180,7 +254,7 @@ function isCurrentTmuxSessionAttached(
   }
 }
 
-function isLaunchedQuestionPaneAlive(
+export function isLaunchedQuestionPaneAlive(
   paneId: string,
   execTmux: ExecTmuxSync,
 ): boolean {
@@ -200,7 +274,7 @@ function isLaunchedQuestionPaneAlive(
   }
 }
 
-function isLaunchedQuestionSessionAlive(
+export function isLaunchedQuestionSessionAlive(
   sessionName: string,
   execTmux: ExecTmuxSync,
 ): boolean {
@@ -211,6 +285,30 @@ function isLaunchedQuestionSessionAlive(
   } catch {
     return false;
   }
+}
+
+export function isWindowsConsoleRendererAlive(pid: number | undefined): boolean {
+  if (!Number.isInteger(pid) || Number(pid) <= 0) return true;
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isQuestionRendererAlive(
+  renderer: QuestionRendererState | undefined,
+  execTmux: ExecTmuxSync = defaultExecTmux,
+): boolean {
+  if (!renderer) return true;
+  if (renderer.renderer === 'tmux-pane') return isLaunchedQuestionPaneAlive(renderer.target, execTmux);
+  if (renderer.renderer === 'tmux-session') {
+    if (renderer.target === 'test-noop-renderer') return true;
+    return isLaunchedQuestionSessionAlive(renderer.target, execTmux);
+  }
+  if (renderer.renderer === 'windows-console') return isWindowsConsoleRendererAlive(renderer.pid);
+  return true;
 }
 
 export function formatQuestionAnswerForInjection(answer: QuestionAnswer): string {
@@ -251,20 +349,25 @@ export function launchQuestionRenderer(
     strategy?: QuestionRendererStrategy;
     execTmux?: ExecTmuxSync;
     sleepSync?: SleepSync;
+    spawnDetachedRenderer?: SpawnDetachedRenderer;
   } = {},
 ): QuestionRendererState {
   const strategy = deps.strategy ?? resolveQuestionRendererStrategy(options.env ?? process.env, undefined, {
     cwd: options.cwd,
     sessionId: options.sessionId,
+    platform: options.platform,
+    stdinIsTTY: options.stdinIsTTY,
+    stdoutIsTTY: options.stdoutIsTTY,
   });
   const execTmux = deps.execTmux ?? defaultExecTmux;
   const sleepImpl = deps.sleepSync ?? sleepSync;
+  const spawnDetachedRenderer = deps.spawnDetachedRenderer ?? defaultSpawnDetachedRenderer;
   const launchedAt = options.nowIso ?? new Date().toISOString();
   const env = options.env ?? process.env;
 
   if (strategy === 'unsupported') {
     throw new Error(
-      'omx question cannot open a visible renderer because this process is not running inside an attached tmux pane. Run omx question from inside tmux.',
+      'omx question cannot open a visible renderer because this process is outside an attached tmux pane and has no explicit tmux return bridge. Codex App/outside-tmux sessions need an attached tmux OMX CLI session or OMX_QUESTION_RETURN_PANE bridge. Run omx question from inside tmux.',
     );
   }
 
@@ -314,6 +417,37 @@ export function launchQuestionRenderer(
       target: paneId,
       launched_at: launchedAt,
       ...(returnTarget ? { return_target: returnTarget, return_transport: 'tmux-send-keys' } : {}),
+    };
+  }
+
+  if (strategy === 'windows-console') {
+    const uiArgs = resolveQuestionUiProcessArgs(options.recordPath, { cwd: options.cwd, env: options.env });
+    const child = spawnDetachedRenderer(
+      env.ComSpec || 'cmd.exe',
+      ['/d', '/s', '/c', buildWindowsConsoleStartCommand(process.execPath, uiArgs)],
+      {
+        cwd: options.cwd,
+        env: buildQuestionUiProcessEnv(env, { sessionId: options.sessionId, returnTarget }),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      },
+    );
+    child.unref();
+    return {
+      renderer: 'windows-console',
+      target: child.pid ? `pid:${child.pid}` : 'windows-console',
+      launched_at: launchedAt,
+      ...(Number.isInteger(child.pid) ? { pid: child.pid } : {}),
+      ...(returnTarget ? { return_target: returnTarget, return_transport: 'tmux-send-keys' } : {}),
+    };
+  }
+
+  if (strategy === 'inline-tty') {
+    return {
+      renderer: 'inline-tty',
+      target: 'inline-tty',
+      launched_at: launchedAt,
     };
   }
 

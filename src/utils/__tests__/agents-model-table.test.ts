@@ -58,6 +58,16 @@ describe('agents model table', () => {
     });
   });
 
+  it('uses the configured frontier model as the standard subagent default when no standard override exists', () => {
+    const context = resolveAgentsModelTableContext('model = "frontier-config"\n');
+
+    assert.deepEqual(context, {
+      frontierModel: 'frontier-config',
+      sparkModel: 'gpt-5.3-codex-spark',
+      subagentDefaultModel: 'frontier-config',
+    });
+  });
+
   it('builds table rows for summary roles and posture/modelClass-driven agent recommendations', () => {
     const table = buildAgentsModelTable({
       frontierModel: 'gpt-frontier',

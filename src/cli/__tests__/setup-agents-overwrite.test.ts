@@ -36,6 +36,10 @@ function setMockHome(home: string): () => void {
   };
 }
 
+function normalizeDarwinTmpPath(value: string): string {
+  return process.platform === 'darwin' ? value.replaceAll('/private/var/', '/var/') : value;
+}
+
 async function runSetupWithCapturedLogs(
   cwd: string,
   options: Parameters<typeof setup>[0]
@@ -49,6 +53,7 @@ async function runSetupWithCapturedLogs(
   };
   try {
     await setup({
+      installModePrompt: async (defaultMode) => defaultMode,
       modelUpgradePrompt: async () => false,
       ...options,
     });
@@ -119,7 +124,7 @@ describe('omx setup AGENTS refresh behavior', () => {
       const agentsContent = await readFile(join(wd, 'AGENTS.md'), 'utf-8');
       const backupPath = join(wd, '.AGENTS.md.bkup');
       assert.match(output, /Generated AGENTS\.md in project root\./);
-      assert.match(output, new RegExp(`Backed up existing AGENTS\\.md to ${backupPath.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\.`));
+      assert.match(normalizeDarwinTmpPath(output), new RegExp(`Backed up existing AGENTS\\.md to ${normalizeDarwinTmpPath(backupPath).replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\.`));
       assert.match(output, /agents_md: updated=1, unchanged=0, backed_up=1, skipped=0, removed=0/);
       assert.match(agentsContent, /^<!-- AUTONOMY DIRECTIVE — DO NOT REMOVE -->/);
       assert.match(agentsContent, /# oh-my-codex - Intelligent Multi-Agent Orchestration/);
@@ -153,7 +158,7 @@ describe('omx setup AGENTS refresh behavior', () => {
       });
 
       const backupPath = join(wd, '.AGENTS.md.bkup2');
-      assert.match(output, new RegExp(`Backed up existing AGENTS\\.md to ${backupPath.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\.`));
+      assert.match(normalizeDarwinTmpPath(output), new RegExp(`Backed up existing AGENTS\\.md to ${normalizeDarwinTmpPath(backupPath).replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\.`));
       assert.equal(await readFile(backupPath, 'utf-8'), existing);
     } finally {
       restoreHome();

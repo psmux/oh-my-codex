@@ -188,7 +188,7 @@ describe('runDeepInterviewQuestion', () => {
               ok: false,
               error: {
                 code: 'question_runtime_failed',
-                message: 'omx question cannot open a visible renderer because this process is not running inside an attached tmux pane.',
+                message: 'omx question cannot open a visible renderer because this process is outside an attached tmux pane and has no explicit tmux return bridge.',
               },
             }),
             stderr: '',

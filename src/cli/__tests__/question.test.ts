@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, it } from 'node:test';
+import { questionCommand } from '../question.js';
 import { markQuestionAnswered, readQuestionRecord } from '../../question/state.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -88,7 +89,7 @@ describe('omx question CLI', () => {
     const recordPath = join(questionsDir, recordFile);
 
     let record = null;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       record = await readQuestionRecord(recordPath);
       if (record?.status === 'prompting') break;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -180,6 +181,116 @@ esac
     assert.equal(record.status, 'error');
     assert.equal(record.error?.code, 'question_runtime_failed');
     assert.match(record.error?.message || '', /pane %5 disappeared immediately after launch/i);
+  });
+
+  it('fails instead of hanging when a renderer pane dies after prompting starts', async () => {
+    const cwd = await makeRepo();
+    const fakeBinDir = join(cwd, 'fake-bin');
+    const tmuxLogPath = join(cwd, 'tmux.log');
+    const countPath = join(cwd, 'list-panes-count');
+    await mkdir(fakeBinDir, { recursive: true });
+    await writeFile(join(fakeBinDir, 'tmux'), `#!/bin/sh
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  display-message)
+    printf '1\n'
+    ;;
+  split-window)
+    printf '%%45\n'
+    ;;
+  list-panes)
+    count=0
+    if [ -f "${countPath}" ]; then count=$(cat "${countPath}"); fi
+    count=$((count + 1))
+    printf '%s' "$count" > "${countPath}"
+    if [ "$count" = "1" ]; then
+      printf '0\t%%45\n'
+      exit 0
+    fi
+    echo "can't find pane: %45" >&2
+    exit 1
+    ;;
+esac
+`, { mode: 0o755 });
+
+    const input = JSON.stringify({
+      question: 'Pick one',
+      options: [{ label: 'A', value: 'a' }],
+      allow_other: true,
+      session_id: 'sess-q',
+    });
+
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [omxBin, 'question', '--input', input, '--json'], {
+        cwd,
+        env: {
+          ...process.env,
+          PATH: `${fakeBinDir}:${process.env.PATH || ''}`,
+          TMUX: '/tmp/fake',
+          TMUX_PANE: '%0',
+          OMX_AUTO_UPDATE: '0',
+          OMX_NOTIFY_FALLBACK: '0',
+          OMX_HOOK_DERIVED_SIGNALS: '0',
+          OMX_QUESTION_WAIT_TIMEOUT_MS: '5000',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+      child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+      child.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+
+    assert.equal(result.code, 1);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error.code, 'question_runtime_failed');
+    assert.match(payload.error.message, /renderer tmux-pane %45 exited before answering/i);
+
+    const entries = await readdir(join(cwd, '.omx', 'state', 'sessions', 'sess-q', 'questions'));
+    assert.equal(entries.length, 1);
+    const recordPath = join(cwd, '.omx', 'state', 'sessions', 'sess-q', 'questions', entries[0]!);
+    const record = JSON.parse(await readFile(recordPath, 'utf-8')) as { status: string; error?: { code?: string; message?: string } };
+    assert.equal(record.status, 'error');
+    assert.equal(record.error?.code, 'question_runtime_failed');
+    assert.match(record.error?.message || '', /exited before answering/i);
+  });
+
+  it('times out unanswered test renderers instead of waiting forever', async () => {
+    const cwd = await makeRepo();
+    const input = JSON.stringify({
+      question: 'Pick one',
+      options: [{ label: 'A', value: 'a' }],
+      allow_other: true,
+      session_id: 'sess-q',
+    });
+
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [omxBin, 'question', '--input', input, '--json'], {
+        cwd,
+        env: {
+          ...process.env,
+          OMX_AUTO_UPDATE: '0',
+          OMX_NOTIFY_FALLBACK: '0',
+          OMX_HOOK_DERIVED_SIGNALS: '0',
+          OMX_QUESTION_TEST_RENDERER: 'noop',
+          OMX_QUESTION_WAIT_TIMEOUT_MS: '50',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+      child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+      child.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+
+    assert.equal(result.code, 1);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error.code, 'question_runtime_failed');
+    assert.match(payload.error.message, /Timed out waiting for question answer after 50ms/i);
   });
 
   it('fails closed outside an attached tmux pane without creating a detached session', async () => {
@@ -375,7 +486,7 @@ esac
     const recordPath = join(questionsDir, recordFile);
 
     let record = null;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       record = await readQuestionRecord(recordPath);
       if (record?.status === 'prompting') break;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -401,6 +512,95 @@ esac
     const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
     assert.match(tmuxLog, /split-window -v -l 12 -t %44 -P -F #\{pane_id\}/);
     assert.doesNotMatch(tmuxLog, /new-session/);
+  });
+
+  it('runs inline in interactive Windows non-attached sessions instead of hard-failing on missing TMUX', async () => {
+    const cwd = await makeRepo();
+    const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+    const originalStdinIsTTY = process.stdin.isTTY;
+    const originalStdoutIsTTY = process.stdout.isTTY;
+    const originalSetRawMode = process.stdin.setRawMode;
+    const originalResume = process.stdin.resume;
+    const originalPause = process.stdin.pause;
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
+    const originalCwd = process.cwd();
+    const originalTmux = process.env.TMUX;
+    const originalTmuxPane = process.env.TMUX_PANE;
+    const originalQuestionReturnPane = process.env.OMX_QUESTION_RETURN_PANE;
+    const originalLeaderPaneId = process.env.OMX_LEADER_PANE_ID;
+    const writes: string[] = [];
+    const stderrWrites: string[] = [];
+
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    delete process.env.TMUX;
+    delete process.env.TMUX_PANE;
+    delete process.env.OMX_QUESTION_RETURN_PANE;
+    delete process.env.OMX_LEADER_PANE_ID;
+    process.stdin.setRawMode = ((_: boolean) => process.stdin) as unknown as typeof process.stdin.setRawMode;
+    process.stdin.resume = (() => process.stdin) as unknown as typeof process.stdin.resume;
+    process.stdin.pause = (() => process.stdin) as unknown as typeof process.stdin.pause;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    process.chdir(cwd);
+
+    try {
+      const runPromise = questionCommand([
+        '--input',
+        JSON.stringify({
+          question: 'Pick one',
+          options: [{ label: 'A', value: 'a' }],
+          allow_other: false,
+          session_id: 'sess-q',
+        }),
+        '--json',
+      ]);
+
+      setTimeout(() => {
+        process.stdin.emit('keypress', '', { name: 'enter' });
+      }, 25);
+
+      await runPromise;
+      const joined = writes.join('');
+      const stderrJoined = stderrWrites.join('');
+      const payload = JSON.parse(joined);
+      assert.equal(payload.ok, true);
+      assert.equal(payload.answer.value, 'a');
+      assert.doesNotMatch(joined, /Use ↑\/↓ to move, Enter to select\./);
+      assert.match(stderrJoined, /Use ↑\/↓ to move, Enter to select\./);
+
+      const entries = await readdir(join(cwd, '.omx', 'state', 'sessions', 'sess-q', 'questions'));
+      assert.equal(entries.length, 1);
+      const record = await readQuestionRecord(join(cwd, '.omx', 'state', 'sessions', 'sess-q', 'questions', entries[0]!));
+      assert.equal(record?.status, 'answered');
+      assert.equal(record?.renderer?.renderer, 'inline-tty');
+    } finally {
+      if (originalPlatformDescriptor) Object.defineProperty(process, 'platform', originalPlatformDescriptor);
+      Object.defineProperty(process.stdin, 'isTTY', { value: originalStdinIsTTY, configurable: true });
+      Object.defineProperty(process.stdout, 'isTTY', { value: originalStdoutIsTTY, configurable: true });
+      process.stdin.setRawMode = originalSetRawMode;
+      process.stdin.resume = originalResume;
+      process.stdin.pause = originalPause;
+      process.stdout.write = originalWrite as typeof process.stdout.write;
+      process.stderr.write = originalStderrWrite as typeof process.stderr.write;
+      process.chdir(originalCwd);
+      if (typeof originalTmux === 'string') process.env.TMUX = originalTmux;
+      else delete process.env.TMUX;
+      if (typeof originalTmuxPane === 'string') process.env.TMUX_PANE = originalTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof originalQuestionReturnPane === 'string') process.env.OMX_QUESTION_RETURN_PANE = originalQuestionReturnPane;
+      else delete process.env.OMX_QUESTION_RETURN_PANE;
+      if (typeof originalLeaderPaneId === 'string') process.env.OMX_LEADER_PANE_ID = originalLeaderPaneId;
+      else delete process.env.OMX_LEADER_PANE_ID;
+    }
   });
 
 });

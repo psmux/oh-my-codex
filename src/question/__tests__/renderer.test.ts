@@ -26,6 +26,17 @@ describe('resolveQuestionRendererStrategy', () => {
     );
   });
 
+  it('uses inline-tty on Windows when no tmux bridge exists but the current terminal is interactive', () => {
+    assert.equal(
+      resolveQuestionRendererStrategy(
+        {} as NodeJS.ProcessEnv,
+        '/usr/bin/tmux',
+        { platform: 'win32', stdinIsTTY: true, stdoutIsTTY: true },
+      ),
+      'inline-tty',
+    );
+  });
+
   it('supports explicit host-pane bridge hints when TMUX is absent', () => {
     assert.equal(
       resolveQuestionRendererStrategy({ OMX_QUESTION_RETURN_PANE: '%77' } as NodeJS.ProcessEnv, '/usr/bin/tmux'),
@@ -34,6 +45,25 @@ describe('resolveQuestionRendererStrategy', () => {
     assert.equal(
       resolveQuestionRendererStrategy({ OMX_LEADER_PANE_ID: '%88' } as NodeJS.ProcessEnv, '/usr/bin/tmux'),
       'inside-tmux',
+    );
+  });
+
+  it('uses a detached Windows console for native psmux return bridges', () => {
+    assert.equal(
+      resolveQuestionRendererStrategy(
+        { TMUX: 'psmux-session', TMUX_PANE: '%44' } as NodeJS.ProcessEnv,
+        'C:/Program Files/psmux/psmux.exe',
+        { platform: 'win32' },
+      ),
+      'windows-console',
+    );
+    assert.equal(
+      resolveQuestionRendererStrategy(
+        { OMX_QUESTION_RETURN_PANE: '%45' } as NodeJS.ProcessEnv,
+        'C:/Program Files/psmux/psmux.exe',
+        { platform: 'win32' },
+      ),
+      'windows-console',
     );
   });
 
@@ -229,6 +259,52 @@ describe('launchQuestionRenderer', () => {
     assert.deepEqual(calls[1], ['list-panes', '-t', '%78', '-F', '#{pane_dead}\t#{pane_id}']);
   });
 
+  it('opens a detached Windows console instead of a psmux split pane when a return bridge is present', () => {
+    const tmuxCalls: string[][] = [];
+    const spawnCalls: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
+    const result = launchQuestionRenderer(
+      {
+        cwd: 'C:/repo',
+        recordPath: 'C:/repo/.omx/state/sessions/s1/questions/question-bridge.json',
+        sessionId: 's1',
+        nowIso: '2026-04-24T00:00:00.000Z',
+        env: { TMUX: 'psmux-session', TMUX_PANE: '%44' } as NodeJS.ProcessEnv,
+        platform: 'win32',
+      },
+      {
+        execTmux: (args) => {
+          tmuxCalls.push(args);
+          return '';
+        },
+        spawnDetachedRenderer: (command, args, options) => {
+          spawnCalls.push({ command, args, options: options as Record<string, unknown> });
+          return { pid: 1234, unref: () => {} };
+        },
+        sleepSync: () => {},
+      },
+    );
+
+    assert.equal(result.renderer, 'windows-console');
+    assert.equal(result.target, 'pid:1234');
+    assert.equal(result.pid, 1234);
+    assert.equal(result.return_target, '%44');
+    assert.equal(result.return_transport, 'tmux-send-keys');
+    assert.deepEqual(tmuxCalls, []);
+    assert.equal(spawnCalls.length, 1);
+    assert.equal(spawnCalls[0]?.command, 'cmd.exe');
+    assert.deepEqual(spawnCalls[0]?.args.slice(0, 3), ['/d', '/s', '/c']);
+    assert.match(spawnCalls[0]?.args[3] || '', /start "OMX Question" \/wait/);
+    assert.match(spawnCalls[0]?.args[3] || '', /"question" "--ui" "--state-path"/);
+    assert.match(spawnCalls[0]?.args[3] || '', /question-bridge\.json"/);
+    assert.equal(spawnCalls[0]?.options.cwd, 'C:/repo');
+    assert.equal(spawnCalls[0]?.options.detached, true);
+    assert.equal(spawnCalls[0]?.options.windowsHide, true);
+    const env = spawnCalls[0]?.options.env as NodeJS.ProcessEnv;
+    assert.equal(env.OMX_SESSION_ID, 's1');
+    assert.equal(env.OMX_QUESTION_RETURN_TARGET, '%44');
+    assert.equal(env.OMX_QUESTION_RETURN_TRANSPORT, 'tmux-send-keys');
+  });
+
   it('targets a persisted workflow pane when launching from a container without TMUX', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'omx-question-renderer-persisted-'));
     try {
@@ -307,6 +383,33 @@ describe('launchQuestionRenderer', () => {
       '/repo/.omx/state/sessions/s1/questions/question-1.json',
     ]);
     assert.deepEqual(calls[2], ['list-panes', '-t', '%42', '-F', '#{pane_dead}\t#{pane_id}']);
+  });
+
+  it('uses inline-tty on Windows without invoking tmux when no attached tmux pane is available', () => {
+    const calls: string[][] = [];
+    const result = launchQuestionRenderer(
+      {
+        cwd: '/repo',
+        recordPath: '/repo/.omx/state/sessions/s1/questions/question-inline.json',
+        sessionId: 's1',
+        nowIso: '2026-04-23T00:00:00.000Z',
+        env: {} as NodeJS.ProcessEnv,
+        platform: 'win32',
+        stdinIsTTY: true,
+        stdoutIsTTY: true,
+      },
+      {
+        execTmux: (args) => {
+          calls.push(args);
+          return '';
+        },
+        sleepSync: () => {},
+      },
+    );
+
+    assert.equal(result.renderer, 'inline-tty');
+    assert.equal(result.target, 'inline-tty');
+    assert.deepEqual(calls, []);
   });
 
   it('falls back to the persisted session mode pane when Bash/tool env lost TMUX_PANE', () => {

@@ -47,6 +47,11 @@ function runOmx(
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', error: r.error?.message };
 }
 
+
+function normalizeDarwinTmpPath(value: string): string {
+  return process.platform === 'darwin' ? value.replaceAll('/private/var/', '/var/') : value;
+}
+
 function shouldSkipForSpawnPermissions(err?: string): boolean {
   return typeof err === 'string' && /(EPERM|EACCES)/i.test(err);
 }
@@ -535,7 +540,8 @@ describe('resolveExploreHarnessCommand', () => {
       await writeFile(binaryPath, '#!/bin/sh\necho hydrated-explore\n');
       await chmod(binaryPath, 0o755);
 
-      const archivePath = join(assetRoot, 'omx-explore-harness-x86_64-unknown-linux-musl.tar.gz');
+      const archiveName = `omx-explore-harness-${process.platform}-${process.arch}.tar.gz`;
+      const archivePath = join(assetRoot, archiveName);
       const archive = spawnSync('tar', ['-czf', archivePath, '-C', stagingDir, packagedExploreHarnessBinaryName()], { encoding: 'utf-8' });
       assert.equal(archive.status, 0, archive.stderr || archive.stdout);
       const archiveBuffer = await readFile(archivePath);
@@ -569,14 +575,14 @@ describe('resolveExploreHarnessCommand', () => {
           assets: [{
             product: 'omx-explore-harness',
             version: '0.8.15',
-            platform: 'linux',
-            arch: 'x64',
-            archive: 'omx-explore-harness-x86_64-unknown-linux-musl.tar.gz',
+            platform: process.platform,
+            arch: process.arch,
+            archive: archiveName,
             binary: 'omx-explore-harness',
             binary_path: 'omx-explore-harness',
             sha256: checksum,
             size: archiveBuffer.length,
-            download_url: `${server.baseUrl}/omx-explore-harness-x86_64-unknown-linux-musl.tar.gz`,
+            download_url: `${server.baseUrl}/${archiveName}`,
           }],
         }, null, 2));
 
@@ -650,7 +656,7 @@ describe('buildExploreHarnessArgs', () => {
       '--model-spark',
       'spark-model',
       '--model-fallback',
-      'gpt-5.4-mini',
+      'gpt-5.5',
     ]);
   });
 
@@ -922,7 +928,7 @@ describe('exploreCommand', () => {
       if (shouldSkipForSpawnPermissions(result.error)) return;
       assert.equal(result.status, 0, result.stderr || result.stdout);
       assert.equal(result.stdout, '# Answer\nReady to proceed\n');
-      assert.equal(await readFile(capturePath, 'utf-8'), `CODEX_HOME=${join(wd, '.codex')}\n`);
+      assert.equal(normalizeDarwinTmpPath(await readFile(capturePath, 'utf-8')), `CODEX_HOME=${normalizeDarwinTmpPath(join(wd, '.codex'))}\n`);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }

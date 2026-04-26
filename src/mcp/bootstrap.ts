@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { resolveOmxFirstPartyMcpEntrypointForPluginTarget } from '../config/omx-first-party-mcp.js';
 
 export type McpServerName = 'state' | 'memory' | 'code_intel' | 'trace' | 'wiki';
 
@@ -17,11 +18,13 @@ const PARENT_WATCHDOG_INTERVAL_ENV = 'OMX_MCP_PARENT_WATCHDOG_INTERVAL_MS';
 const DUPLICATE_SIBLING_WATCHDOG_INTERVAL_ENV = 'OMX_MCP_DUPLICATE_SIBLING_WATCHDOG_INTERVAL_MS';
 const DUPLICATE_SIBLING_PRE_TRAFFIC_GRACE_ENV = 'OMX_MCP_DUPLICATE_SIBLING_PRE_TRAFFIC_GRACE_MS';
 const DUPLICATE_SIBLING_POST_TRAFFIC_IDLE_ENV = 'OMX_MCP_DUPLICATE_SIBLING_POST_TRAFFIC_IDLE_MS';
+export const MCP_ENTRYPOINT_MARKER_ENV = 'OMX_MCP_ENTRYPOINT_MARKER';
 const DEFAULT_PARENT_WATCHDOG_INTERVAL_MS = 1_000;
 const DEFAULT_DUPLICATE_SIBLING_WATCHDOG_INTERVAL_MS = 5_000;
 const DEFAULT_DUPLICATE_SIBLING_PRE_TRAFFIC_GRACE_MS = 2_000;
 const DEFAULT_DUPLICATE_SIBLING_POST_TRAFFIC_IDLE_MS = 60_000;
 const MCP_ENTRYPOINT_PATTERN = /\b([a-z0-9-]+-server\.(?:[cm]?js|ts))\b/i;
+const MCP_SERVE_TARGET_PATTERN = /(?:^|\s)mcp-serve\s+([^\s]+)/i;
 
 interface StdioLifecycleServer {
   connect(transport: StdioServerTransport): Promise<unknown>;
@@ -53,8 +56,23 @@ function normalizeCommand(command: string): string {
 }
 
 export function extractMcpEntrypointMarker(command: string): string | null {
-  const match = normalizeCommand(command).match(MCP_ENTRYPOINT_PATTERN);
-  return match?.[1]?.toLowerCase() ?? null;
+  const normalizedCommand = normalizeCommand(command);
+  const entrypointMatch = normalizedCommand.match(MCP_ENTRYPOINT_PATTERN);
+  if (entrypointMatch?.[1]) return entrypointMatch[1].toLowerCase();
+
+  const mcpServeMatch = normalizedCommand.match(MCP_SERVE_TARGET_PATTERN);
+  return resolveOmxFirstPartyMcpEntrypointForPluginTarget(mcpServeMatch?.[1]);
+}
+
+export function resolveCurrentMcpEntrypointMarker(
+  env: Record<string, string | undefined> = process.env,
+  argv1: string | undefined = process.argv[1],
+): string | null {
+  const explicitMarker = extractMcpEntrypointMarker(
+    env[MCP_ENTRYPOINT_MARKER_ENV] ?? '',
+  );
+  if (explicitMarker) return explicitMarker;
+  return extractMcpEntrypointMarker(argv1 ?? '');
 }
 
 export function parseProcessTable(output: string): ProcessTableEntry[] {
@@ -266,7 +284,10 @@ export function autoStartStdioMcpServer(
   const lifecycleDebugEnabled = env[LIFECYCLE_DEBUG_ENV] === '1';
   const lifecycleTiming = resolveLifecycleTimingConfig(env);
   const trackedParentPid = Number.isInteger(process.ppid) ? process.ppid : 0;
-  const trackedEntrypoint = extractMcpEntrypointMarker(process.argv[1] ?? '');
+  const trackedEntrypoint = resolveCurrentMcpEntrypointMarker(
+    env,
+    process.argv[1] ?? '',
+  );
   let lastTrafficAtMs: number | null = null;
   let duplicateObservedAtMs: number | null = null;
 

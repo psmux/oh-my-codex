@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-04-25
+
+Minor release focused on making OMX easier to install, ship, and operate across Codex CLI, Codex App, plugin, native-agent, tmux, and Rust-backed execution surfaces. This release prepares the plugin delivery train, Visual Ralph, setup install-mode selection, native agent/model routing, hook/runtime hardening, Windows/tmux question reliability, CI hang protection, Rust compatibility fixes, and release collateral for the `0.15.0` cut.
+
+### Added
+- **First-party Codex plugin packaging** — OMX now ships a mirrored `plugins/oh-my-codex` bundle, plugin marketplace metadata, Codex App compatibility descriptors, plugin bundle SSOT checks, and install-mode setup coverage.
+- **Visual Ralph workflow** — `visual-ralph` is now a first-class workflow skill with routing, metadata validation, generated docs, and regression coverage.
+- **Native-agent policy/model routing** — native subagent definitions, model table generation, and setup overwrite tests now preserve the `gpt-5.5` frontier, `gpt-5.4-mini` standard, and `gpt-5.3-codex-spark` fast-lane contract.
+- **Document refresh enforcement and first-party MCP surfaces** — setup/config paths now include the new refresh-enforcer and first-party MCP configuration coverage.
+
+### Changed
+- **Setup can choose plugin or legacy skill delivery** — project setup now preserves persisted install mode, reports plugin cleanup/backups, keeps managed hooks/runtime assets aligned, and makes next steps clearer for Codex App and CLI users.
+- **Plugin and generated assets are checked from one source of truth** — native-agent verification, plugin mirror sync, generated catalog docs, and package bin/layout tests now guard release packaging drift.
+- **Team/runtime prompts are more explicit about safe execution** — worker, team, Ralph, doctor, help, and setup guidance now better describe plugin mode, runtime ownership, and action-first execution boundaries.
+- **Release base handling is explicit** — `v0.14.4` exists but is not an ancestor of the current `dev` candidate; this release uses `v0.14.3` as the verified reachable compare base and records that range caveat in release collateral.
+
+### Fixed
+- **Codex App and plugin hook compatibility** — App sessions avoid tmux-only runtime paths, plugin-prefixed skills route correctly, scoped plugin content stays aligned with canonical sources, and setup avoids overwriting local ignore state.
+- **Windows/tmux question reliability** — Windows/non-attached question rendering and console behavior have stronger fallbacks and regression coverage.
+- **Hook and watcher hardening** — notification fallback watchers, derived watchers, stale tmux sockets, Stop-hook parseability, and setup plugin fixes are covered by targeted regressions.
+- **CI and Rust compatibility** — Node test execution has bounded silence handling, and the explore harness remains compatible with Cargo/Rust 1.73-era constraints.
+- **Release metadata drift** — Node/Cargo metadata, lockfiles, changelog, release body, release notes, and release-readiness collateral are aligned to `0.15.0`.
+
 ## [0.14.4] - 2026-04-24
 
 Patch release focused on promoting the default frontier lane from `gpt-5.4` to `gpt-5.5` while preserving the exact `gpt-5.4-mini` standard/mini seam and the `gpt-5.3-codex-spark` spark lane. Docs, setup/config guidance, templates, regression coverage, and release metadata are aligned to that contract.

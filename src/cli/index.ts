@@ -7,7 +7,7 @@ import { execFileSync, spawn } from "child_process";
 import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { constants as osConstants } from "os";
-import { setup, SETUP_SCOPES, type SetupScope } from "./setup.js";
+import { setup, SETUP_SCOPES, type SetupInstallMode, type SetupScope } from "./setup.js";
 import { uninstall } from "./uninstall.js";
 import { version } from "./version.js";
 import { tmuxHookCommand } from "./tmux-hook.js";
@@ -32,7 +32,9 @@ import { agentsCommand } from "./agents.js";
 import { sessionCommand } from "./session-search.js";
 import { autoresearchCommand } from "./autoresearch.js";
 import { mcpParityCommand } from "./mcp-parity.js";
+import { mcpServeCommand } from "./mcp-serve.js";
 import { adaptCommand } from "./adapt.js";
+import { listCommand } from "./list.js";
 import {
   MADMAX_FLAG,
   CODEX_BYPASS_FLAG,
@@ -155,9 +157,11 @@ Usage:
   omx           Launch Codex CLI (HUD auto-attaches only when already inside tmux)
   omx exec      Run codex exec non-interactively with OMX AGENTS/overlay injection
   omx setup     Install skills, prompts, MCP servers, and scope-specific AGENTS.md
+                (user scope prompts for legacy vs plugin skill delivery when needed)
   omx update    Check npm now, update the global install immediately, then refresh setup
   omx uninstall Remove OMX configuration and clean up installed artifacts
   omx doctor    Check installation health
+  omx list      List packaged OMX skills and native agent prompts (--json)
   omx cleanup   Kill orphaned OMX MCP server processes and remove stale OMX /tmp directories
   omx doctor --team  Check team/swarm runtime health diagnostics
   omx ask       Ask local provider CLI (claude|gemini) and write artifact output
@@ -186,6 +190,7 @@ Usage:
   omx code-intel
                 CLI parity for OMX code-intel MCP tools
   omx wiki      CLI parity for OMX wiki MCP tools
+  omx mcp-serve Launch an OMX stdio MCP server target (plugin/runtime use)
   omx sparkshell <command> [args...]
   omx sparkshell --tmux-pane <pane-id> [--tail-lines <100-1000>]
                 Run native sparkshell sidecar for direct command execution or explicit tmux-pane summarization
@@ -218,14 +223,12 @@ Options:
                 Launch Codex in a git worktree (detached when no name is given)
   --force       Force reinstall (overwrite existing files)
   --dry-run     Show what would be done without doing it
+  --plugin      Use Codex plugin delivery for omx setup and remove legacy OMX-managed user/project components
   --keep-config Skip config.toml cleanup during uninstall
   --purge       Remove .omx/ cache directory during uninstall
   --verbose     Show detailed output
   --scope       Setup scope for "omx setup" only:
                 user | project
-  --skill-target
-                User-scope skills target for "omx setup" only:
-                codex-home
 `;
 
 const REASONING_KEY = "model_reasoning_effort";
@@ -272,6 +275,7 @@ type CliCommand =
   | "exec"
   | "setup"
   | "update"
+  | "list"
   | "agents"
   | "agents-init"
   | "deepinit"
@@ -292,6 +296,7 @@ type CliCommand =
   | "hud"
   | "state"
   | "wiki"
+  | "mcp-serve"
   | "status"
   | "cancel"
   | "help"
@@ -309,9 +314,11 @@ const NESTED_HELP_COMMANDS = new Set<CliCommand>([
   "deepinit",
   "exec",
   "hooks",
+  "list",
   "hud",
   "state",
   "wiki",
+  "mcp-serve",
   "ralph",
   "resume",
   "session",
@@ -323,6 +330,11 @@ const NESTED_HELP_COMMANDS = new Set<CliCommand>([
 export interface ResolvedCliInvocation {
   command: CliCommand;
   launchArgs: string[];
+}
+
+export function resolveSetupInstallModeArg(args: string[]): SetupInstallMode | undefined {
+  if (args.includes("--plugin")) return "plugin";
+  return undefined;
 }
 
 export function resolveSetupScopeArg(args: string[]): SetupScope | undefined {
@@ -472,6 +484,93 @@ function hasErrnoCode(error: unknown, code: string): boolean {
   );
 }
 
+
+function isMissingTmuxLaunchNoise(error: unknown): boolean {
+  return error instanceof Error && /spawnSync tmux ENOENT/i.test(error.message);
+}
+
+function logCliOperationFailure(error: unknown): void {
+  if (isMissingTmuxLaunchNoise(error)) return;
+  process.stderr.write(`[cli/index] operation failed: ${error}
+`);
+}
+
+function tmuxFailureMessage(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const err = error as ExecFileSyncFailure & {
+    stdout?: Buffer | string;
+    stderr?: Buffer | string;
+  };
+  const stderr =
+    typeof err.stderr === "string" ? err.stderr : err.stderr?.toString();
+  const stdout =
+    typeof err.stdout === "string" ? err.stdout : err.stdout?.toString();
+  const detail = (stderr || stdout || err.message || String(error)).trim();
+  return detail.replace(/\s+/g, " ");
+}
+
+function isBenignMissingTmuxServerMessage(message: string): boolean {
+  return /no server running/i.test(message);
+}
+
+export interface TmuxLaunchHealth {
+  usable: boolean;
+  reason?: string;
+}
+
+export function checkDetachedTmuxLaunchHealth(): TmuxLaunchHealth {
+  try {
+    execTmuxFileSync(["list-sessions"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf-8",
+    });
+    return { usable: true };
+  } catch (err) {
+    const reason = tmuxFailureMessage(err);
+    if (isBenignMissingTmuxServerMessage(reason)) {
+      return { usable: true };
+    }
+    return { usable: false, reason };
+  }
+}
+
+function warnDetachedTmuxFallback(reason?: string): void {
+  const suffix = reason ? ` (${reason})` : "";
+  console.warn(
+    `[omx] warning: tmux is installed but its server/socket is unusable${suffix}. Falling back to direct Codex launch.`,
+  );
+}
+
+function resolveTmuxAwareLaunchPolicy(
+  explicitLaunchPolicy: CodexLaunchPolicy | undefined,
+  nativeWindows: boolean,
+): {
+  launchPolicy: CodexLaunchPolicy;
+  effectiveExplicitLaunchPolicy: CodexLaunchPolicy | undefined;
+} {
+  const launchPolicy = resolveCodexLaunchPolicy(
+    process.env,
+    process.platform,
+    undefined,
+    nativeWindows,
+    undefined,
+    undefined,
+    explicitLaunchPolicy,
+  );
+
+  if (launchPolicy !== "detached-tmux") {
+    return { launchPolicy, effectiveExplicitLaunchPolicy: explicitLaunchPolicy };
+  }
+
+  const tmuxHealth = checkDetachedTmuxLaunchHealth();
+  if (tmuxHealth.usable) {
+    return { launchPolicy, effectiveExplicitLaunchPolicy: explicitLaunchPolicy };
+  }
+
+  warnDetachedTmuxFallback(tmuxHealth.reason);
+  return { launchPolicy: "direct", effectiveExplicitLaunchPolicy: "direct" };
+}
+
 export interface CodexExecFailureClassification {
   kind: "exit" | "launch-error";
   code?: string;
@@ -598,6 +697,7 @@ export async function main(args: string[]): Promise<void> {
     "exec",
     "setup",
     "update",
+    "list",
     "agents",
     "agents-init",
     "deepinit",
@@ -618,6 +718,7 @@ export async function main(args: string[]): Promise<void> {
     "hooks",
     "hud",
     "state",
+    "mcp-serve",
     "status",
     "cancel",
     "help",
@@ -653,10 +754,14 @@ export async function main(args: string[]): Promise<void> {
           dryRun: options.dryRun,
           verbose: options.verbose,
           scope: resolveSetupScopeArg(args.slice(1)),
+          installMode: resolveSetupInstallModeArg(args.slice(1)),
         });
         break;
       case "update":
         await runImmediateUpdate(process.cwd());
+        break;
+      case "list":
+        await listCommand(args.slice(1));
         break;
       case "agents":
         await agentsCommand(args.slice(1));
@@ -738,6 +843,9 @@ export async function main(args: string[]): Promise<void> {
       case "wiki":
         await mcpParityCommand("wiki", args.slice(1));
         break;
+      case "mcp-serve":
+        await mcpServeCommand(args.slice(1));
+        break;
       case "tmux-hook":
         await tmuxHookCommand(args.slice(1));
         break;
@@ -793,7 +901,7 @@ async function showStatus(): Promise<void> {
       try {
         state = JSON.parse(content) as Record<string, unknown>;
       } catch (err) {
-        process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+        logCliOperationFailure(err);
         continue;
       }
       const file = basename(path);
@@ -803,7 +911,7 @@ async function showStatus(): Promise<void> {
       );
     }
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     console.log("No active modes.");
   }
 }
@@ -890,15 +998,8 @@ export async function launchWithHud(args: string[]): Promise<void> {
     notifyTempResult.passthroughArgs,
   );
   const codexHomeOverride = resolveCodexHomeForLaunch(launchCwd, process.env);
-  const launchPolicy = resolveCodexLaunchPolicy(
-    process.env,
-    process.platform,
-    undefined,
-    isNativeWindows(),
-    undefined,
-    undefined,
-    explicitLaunchPolicy,
-  );
+  const { launchPolicy, effectiveExplicitLaunchPolicy } =
+    resolveTmuxAwareLaunchPolicy(explicitLaunchPolicy, isNativeWindows());
   const enableNotifyFallbackAuthority = launchPolicy === "direct";
   const workerSparkModel = resolveWorkerSparkModel(
     notifyTempResult.passthroughArgs,
@@ -938,14 +1039,14 @@ export async function launchWithHud(args: string[]): Promise<void> {
   try {
     await maybeCheckAndPromptUpdate(cwd);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal: update checks must never block launch
   }
 
   try {
     await maybePromptGithubStar();
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal: star prompt must never block launch
   }
 
@@ -987,7 +1088,7 @@ export async function launchWithHud(args: string[]): Promise<void> {
       workerSparkModel,
       codexHomeOverride,
       notifyTempContractRaw,
-      explicitLaunchPolicy,
+      effectiveExplicitLaunchPolicy,
     );
   } finally {
     // ── Phase 3: postLaunch ─────────────────────────────────────────────
@@ -1039,13 +1140,13 @@ export async function execWithOverlay(args: string[]): Promise<void> {
   try {
     await maybeCheckAndPromptUpdate(cwd);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
   }
 
   try {
     await maybePromptGithubStar();
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
   }
 
   try {
@@ -1468,7 +1569,7 @@ export function detectDetachedSessionWindowIndex(sessionName: string): string | 
     );
     return parseWindowIndexFromTmuxOutput(output);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     return null;
   }
 }
@@ -1680,7 +1781,7 @@ export function acquireTmuxExtendedKeysLease(
     });
     return `${socketPath}\t${leaseId}`;
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     return null;
   }
 }
@@ -1724,7 +1825,7 @@ export function releaseTmuxExtendedKeysLease(
       rmSync(leasePath, { force: true });
     });
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
   }
 }
 
@@ -2272,7 +2373,7 @@ async function preLaunch(
       );
     }
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2302,7 +2403,7 @@ ${launchAppendix}${dirtyWorktreeGuidance}`
   try {
     await startNotifyFallbackWatcher(cwd, { codexHomeOverride, enableAuthority: enableNotifyFallbackAuthority, sessionId });
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2310,7 +2411,7 @@ ${launchAppendix}${dirtyWorktreeGuidance}`
   try {
     await startHookDerivedWatcher(cwd);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2342,7 +2443,7 @@ ${launchAppendix}${dirtyWorktreeGuidance}`
       projectName: basename(cwd),
     });
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal: notification failures must never block launch
   }
 
@@ -2357,7 +2458,7 @@ ${launchAppendix}${dirtyWorktreeGuidance}`
       }),
     });
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 }
@@ -2407,14 +2508,9 @@ function runCodex(
     ? { ...codexEnv, [OMX_NOTIFY_TEMP_CONTRACT_ENV]: notifyTempContractRaw }
     : codexEnv;
 
-  const launchPolicy = resolveCodexLaunchPolicy(
-    process.env,
-    process.platform,
-    undefined,
-    nativeWindows,
-    undefined,
-    undefined,
+  const { launchPolicy } = resolveTmuxAwareLaunchPolicy(
     explicitLaunchPolicy,
+    nativeWindows,
   );
 
   if (isCodexVersionRequest(launchArgs)) {
@@ -2434,7 +2530,7 @@ function runCodex(
     try {
       hudPaneId = createHudWatchPane(cwd, hudCmd);
     } catch (err) {
-      process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+      logCliOperationFailure(err);
       // HUD split failed, continue without it
     }
 
@@ -2452,7 +2548,7 @@ function runCodex(
         }).trim();
         if (tmuxSession) enableMouseScrolling(tmuxSession);
       } catch (err) {
-        process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+        logCliOperationFailure(err);
         // Non-fatal: mouse scrolling is a convenience feature
       }
     }
@@ -2561,7 +2657,7 @@ function runCodex(
               try {
                 mitigateCopyModeUnderlineArtifacts(sessionName);
               } catch (err) {
-                process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+                logCliOperationFailure(err);
               }
               continue;
             }
@@ -2570,7 +2666,7 @@ function runCodex(
             try {
               execTmuxFileSync(finalizeStep.args, { stdio });
             } catch (err) {
-              process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+              logCliOperationFailure(err);
               if (finalizeStep.name === "attach-session")
                 throw new Error("failed to attach detached tmux session");
               continue;
@@ -2593,7 +2689,7 @@ function runCodex(
         }
       }
     } catch (err) {
-      process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+      logCliOperationFailure(err);
       if (createdDetachedSession) {
         const rollbackSteps = buildDetachedSessionRollbackSteps(
           sessionName,
@@ -2605,7 +2701,7 @@ function runCodex(
           try {
             execTmuxFileSync(rollbackStep.args, { stdio: "ignore" });
           } catch (err) {
-            process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+            logCliOperationFailure(err);
             // best-effort rollback only
           }
         }
@@ -2620,7 +2716,7 @@ function listHudWatchPaneIdsInCurrentWindow(currentPaneId?: string): string[] {
   try {
     return listCurrentWindowHudPaneIds(currentPaneId);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     return [];
   }
 }
@@ -2634,7 +2730,7 @@ function killTmuxPane(paneId: string): void {
   try {
     killSharedTmuxPane(paneId);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Pane may already be gone; ignore.
   }
 }
@@ -2756,7 +2852,7 @@ async function postLaunch(
     const sessionState = await readSessionState(cwd);
     sessionStartedAt = sessionState?.started_at;
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2767,7 +2863,7 @@ async function postLaunch(
   try {
     await flushNotifyFallbackOnce(cwd, { codexHomeOverride, enableAuthority: enableNotifyFallbackAuthority, sessionId });
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2775,7 +2871,7 @@ async function postLaunch(
   try {
     await stopNotifyFallbackWatcher(cwd);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2783,7 +2879,7 @@ async function postLaunch(
   try {
     await flushHookDerivedWatcherOnce(cwd);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2791,7 +2887,7 @@ async function postLaunch(
   try {
     await stopHookDerivedWatcher(cwd);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2818,7 +2914,7 @@ async function postLaunch(
     const { onSessionEnd } = await import("../wiki/lifecycle.js");
     onSessionEnd({ cwd, session_id: sessionId });
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal: wiki capture must never block session cleanup
   }
 
@@ -2845,7 +2941,7 @@ async function postLaunch(
       reason: "session_exit",
     });
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal: notification failures must never block session cleanup
   }
 
@@ -2854,7 +2950,7 @@ async function postLaunch(
     const { markOwnedTeamsLeaderSessionStopped } = await import("../team/state.js");
     await markOwnedTeamsLeaderSessionStopped(cwd, sessionId);
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 
@@ -2884,7 +2980,7 @@ async function postLaunch(
       }),
     });
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     // Non-fatal
   }
 }
@@ -3422,7 +3518,7 @@ async function cancelModes(): Promise<void> {
       try {
         parsedState = JSON.parse(content) as Record<string, unknown>;
       } catch (err) {
-        process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+        logCliOperationFailure(err);
         continue;
       }
       states.set(ref.mode, {
@@ -3487,7 +3583,7 @@ async function cancelModes(): Promise<void> {
       console.log("No active modes to cancel.");
     }
   } catch (err) {
-    process.stderr.write(`[cli/index] operation failed: ${err}\n`);
+    logCliOperationFailure(err);
     console.log("No active modes to cancel.");
   }
 }

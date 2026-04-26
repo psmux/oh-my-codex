@@ -1,4 +1,12 @@
+import {
+  buildDocumentRefreshAdvisoryOutput,
+  evaluateStagedDocumentRefresh,
+} from "../document-refresh/enforcer.js";
+import { resolveCodexExecutionSurface } from "./codex-execution-surface.js";
+
 type CodexHookPayload = Record<string, unknown>;
+
+type GitRepositorySelection = "current-cwd" | "explicit-target";
 
 export interface NormalizedPreToolUsePayload {
   toolName: string;
@@ -43,6 +51,16 @@ function safeObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function isNativeOutsideTmuxSurface(payload: CodexHookPayload): boolean {
+  const cwd = safeString(payload.cwd).trim() || process.cwd();
+  const surface = resolveCodexExecutionSurface(cwd, {
+    hookEventName: "PreToolUse",
+    payload,
+    nativeSessionId: safeString(payload.session_id ?? payload.sessionId).trim(),
+  });
+  return surface.launcher === "native" && surface.transport === "outside-tmux";
 }
 
 function tryParseJsonString(value: unknown): Record<string, unknown> | null {
@@ -268,6 +286,7 @@ function tokenizeShellCommand(commandText: string): string[] | null {
 interface GitCommitCommandParseResult {
   isGitCommit: boolean;
   inlineMessage: string | null;
+  repositorySelection: GitRepositorySelection;
   requiresExternalMessageSource: boolean;
 }
 
@@ -348,6 +367,14 @@ function gitOptionConsumesNextValue(token: string): boolean {
     || token === "--attr-source";
 }
 
+function gitOptionSelectsRepository(token: string): boolean {
+  return token === "-C"
+    || token === "--git-dir"
+    || token === "--work-tree"
+    || token.startsWith("--git-dir=")
+    || token.startsWith("--work-tree=");
+}
+
 function gitOptionStopsBeforeSubcommand(token: string): boolean {
   return token === "-h"
     || token === "--help"
@@ -382,12 +409,22 @@ function findGitSubcommandIndex(tokens: string[], gitTokenIndex: number): number
   return index < tokens.length ? index : -1;
 }
 
-function parseGitCommitCommand(commandText: string): GitCommitCommandParseResult {
+function readGitRepositorySelection(tokens: string[], gitTokenIndex: number, subcommandIndex: number): GitRepositorySelection {
+  for (let index = gitTokenIndex + 1; index < subcommandIndex; index += 1) {
+    const token = tokens[index] ?? "";
+    if (gitOptionSelectsRepository(token)) return "explicit-target";
+    if (gitOptionConsumesNextValue(token)) index += 1;
+  }
+  return "current-cwd";
+}
+
+export function parseGitCommitCommand(commandText: string): GitCommitCommandParseResult {
   const tokens = tokenizeShellCommand(commandText);
   if (!tokens) {
     return {
       isGitCommit: false,
       inlineMessage: null,
+      repositorySelection: "current-cwd",
       requiresExternalMessageSource: false,
     };
   }
@@ -397,6 +434,7 @@ function parseGitCommitCommand(commandText: string): GitCommitCommandParseResult
     return {
       isGitCommit: false,
       inlineMessage: null,
+      repositorySelection: "current-cwd",
       requiresExternalMessageSource: false,
     };
   }
@@ -406,10 +444,12 @@ function parseGitCommitCommand(commandText: string): GitCommitCommandParseResult
     return {
       isGitCommit: false,
       inlineMessage: null,
+      repositorySelection: "current-cwd",
       requiresExternalMessageSource: false,
     };
   }
 
+  const repositorySelection = readGitRepositorySelection(tokens, gitTokenIndex, subcommandIndex);
   const messageParts: string[] = [];
   let requiresExternalMessageSource = false;
   const args = tokens.slice(subcommandIndex + 1);
@@ -452,6 +492,7 @@ function parseGitCommitCommand(commandText: string): GitCommitCommandParseResult
   return {
     isGitCommit: true,
     inlineMessage: messageParts.length > 0 ? messageParts.join("\n\n").trim() : null,
+    repositorySelection,
     requiresExternalMessageSource,
   };
 }
@@ -562,6 +603,22 @@ function buildGitCommitEnforcementOutput(commandText: string): Record<string, un
   };
 }
 
+
+function buildDocumentRefreshPreToolUseOutput(
+  commandText: string,
+  cwd: string,
+): Record<string, unknown> | null {
+  const parsed = parseGitCommitCommand(commandText);
+  if (!parsed.isGitCommit) return null;
+
+  if (parsed.repositorySelection !== "current-cwd") return null;
+
+  const warning = evaluateStagedDocumentRefresh(cwd, parsed.inlineMessage);
+  if (!warning) return null;
+
+  return buildDocumentRefreshAdvisoryOutput(warning, "PreToolUse");
+}
+
 function commandInvokesOmxQuestion(command: string): boolean {
   const tokens = tokenizeShellCommand(command)?.map((token) => token.toLowerCase()) ?? [];
   for (let index = 0; index < tokens.length; index += 1) {
@@ -582,26 +639,95 @@ function isQuestionReturnPaneAssignment(token: string): boolean {
   return /^%\d+$/.test(value) || /^\$\{?TMUX_PANE\}?$/.test(value);
 }
 
+function hasInheritedQuestionReturnPaneBridge(): boolean {
+  // Intentionally trust only the explicit bridge envs that question renderer
+  // already accepts outside tmux; TMUX_PANE alone is not stable across all
+  // Bash/background-terminal tool paths that this enforcement protects.
+  const explicitPane = safeString(
+    process.env.OMX_QUESTION_RETURN_PANE || process.env.OMX_LEADER_PANE_ID,
+  ).trim();
+  return /^%\d+$/.test(explicitPane);
+}
+
+function commandHasPowerShellQuestionReturnPane(command: string): boolean {
+  return /\$env:(?:OMX_QUESTION_RETURN_PANE|OMX_LEADER_PANE_ID)\s*=\s*(?:['"]?%\d+['"]?|\$env:TMUX_PANE)\b/i.test(command)
+    || /\$env:TMUX_PANE\s*=\s*['"]?%\d+['"]?/i.test(command);
+}
+
 function commandHasQuestionReturnPane(command: string): boolean {
+  if (hasInheritedQuestionReturnPaneBridge()) return true;
+  if (commandHasPowerShellQuestionReturnPane(command)) return true;
   return (tokenizeShellCommand(command) ?? []).some(isQuestionReturnPaneAssignment);
 }
 
-function buildOmxQuestionPreToolUseEnforcementOutput(command: string): Record<string, unknown> | null {
+function commandInvokesOmxTeam(command: string): boolean {
+  const tokens = tokenizeShellCommand(command)?.map((token) => token.toLowerCase()) ?? [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const rawToken = tokens[index] || '';
+    const token = rawToken.replace(/\\/g, '/').split('/').pop() || '';
+    if ((token === 'omx' || token === 'omx.js') && tokens[index + 1] === 'team') return true;
+    if ((token === 'node' || token === 'node.exe') && /(?:^|\/)omx\.js$/.test(tokens[index + 1] || '') && tokens[index + 2] === 'team') return true;
+  }
+  return /\bomx\s+team\b/i.test(command) || /\bomx\.js['"]?\s+team\b/i.test(command);
+}
+
+function commandInvokesOmxHud(command: string): boolean {
+  const tokens = tokenizeShellCommand(command)?.map((token) => token.toLowerCase()) ?? [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const rawToken = tokens[index] || '';
+    const token = rawToken.replace(/\\/g, '/').split('/').pop() || '';
+    if ((token === 'omx' || token === 'omx.js') && tokens[index + 1] === 'hud') return true;
+    if ((token === 'node' || token === 'node.exe') && /(?:^|\/)omx\.js$/.test(tokens[index + 1] || '') && tokens[index + 2] === 'hud') return true;
+  }
+  return /\bomx\s+hud\b/i.test(command) || /\bomx\.js['"]?\s+hud\b/i.test(command);
+}
+
+function buildNativeOmxHudPreToolUseEnforcementOutput(
+  command: string,
+  payload: CodexHookPayload,
+): Record<string, unknown> | null {
+  if (!isNativeOutsideTmuxSurface(payload) || !commandInvokesOmxHud(command)) return null;
+
+  return {
+    decision: "block",
+    reason: "omx hud cannot be launched directly from Codex App/native outside-tmux Bash sessions.",
+    systemMessage: "omx hud is blocked from Bash in Codex App/native outside-tmux sessions; use SessionStart/HUD context instead, or launch OMX CLI from an attached tmux shell first for the tmux HUD runtime.",
+  };
+}
+
+function buildNativeOmxTeamPreToolUseEnforcementOutput(
+  command: string,
+  payload: CodexHookPayload,
+): Record<string, unknown> | null {
+  if (!isNativeOutsideTmuxSurface(payload) || !commandInvokesOmxTeam(command)) return null;
+
+  return {
+    decision: "block",
+    reason: "omx team cannot be launched directly from Codex App/native outside-tmux Bash sessions.",
+    systemMessage: `omx team is blocked from Bash in Codex App/native outside-tmux sessions; launch OMX CLI from an attached tmux shell first. Original command: ${command}`,
+  };
+}
+
+function buildOmxQuestionPreToolUseEnforcementOutput(
+  command: string,
+  payload: CodexHookPayload,
+): Record<string, unknown> | null {
   if (!commandInvokesOmxQuestion(command)) return null;
+
+  if (isNativeOutsideTmuxSurface(payload)) {
+    return {
+      decision: "block",
+      reason: "omx question cannot be launched directly from Codex App/native outside-tmux Bash sessions.",
+      systemMessage: `omx question is blocked from Codex App/native outside-tmux Bash because no attached tmux pane is available. Use the native structured question tool when available, or ask exactly one concise plain-text question. Original command: ${command}`,
+    };
+  }
+
   if (commandHasQuestionReturnPane(command)) return null;
 
   return {
     decision: "block",
     reason: "omx question Bash invocations must preserve the leader pane return target.",
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      additionalContext: [
-        "omx question leader-pane enforcement triggered.",
-        "Prefix the Bash command with `OMX_QUESTION_RETURN_PANE=$TMUX_PANE` (or a concrete `%pane` value) so `[omx question answered]` returns to the leader pane even when the tool path drops/stales TMUX_PANE.",
-        `Original command: ${command}`,
-      ].join("\n"),
-    },
-    systemMessage: "omx question is blocked from Bash until the command preserves the leader pane with `OMX_QUESTION_RETURN_PANE=$TMUX_PANE` or an explicit `%pane` value.",
+    systemMessage: `omx question is blocked from Bash until the command preserves the leader pane with \`OMX_QUESTION_RETURN_PANE=$TMUX_PANE\` or an explicit \`%pane\` value. Original command: ${command}`,
   };
 }
 
@@ -612,8 +738,17 @@ export function buildNativePreToolUseOutput(
   if (!normalized.isBash) return null;
   const gitCommitEnforcement = buildGitCommitEnforcementOutput(normalized.normalizedCommand);
   if (gitCommitEnforcement) return gitCommitEnforcement;
-  const questionEnforcement = buildOmxQuestionPreToolUseEnforcementOutput(normalized.normalizedCommand);
+  const hudEnforcement = buildNativeOmxHudPreToolUseEnforcementOutput(normalized.normalizedCommand, payload);
+  if (hudEnforcement) return hudEnforcement;
+  const teamEnforcement = buildNativeOmxTeamPreToolUseEnforcementOutput(normalized.normalizedCommand, payload);
+  if (teamEnforcement) return teamEnforcement;
+  const questionEnforcement = buildOmxQuestionPreToolUseEnforcementOutput(normalized.normalizedCommand, payload);
   if (questionEnforcement) return questionEnforcement;
+  const documentRefreshWarning = buildDocumentRefreshPreToolUseOutput(
+    normalized.normalizedCommand,
+    safeString(payload.cwd).trim() || process.cwd(),
+  );
+  if (documentRefreshWarning) return documentRefreshWarning;
   if (!matchesDestructiveFixture(normalized.normalizedCommand)) return null;
 
   return {
@@ -653,6 +788,7 @@ export function buildNativePostToolUseOutput(
   if (!normalized.isBash) return null;
 
   const combined = `${normalized.stderrText}\n${normalized.stdoutText}`.trim();
+  if (normalized.exitCode === 0) return null;
   if (containsHardFailure(combined)) {
     return {
       decision: "block",
