@@ -75,6 +75,15 @@ export function resolveCurrentTag(cwd: string, explicit?: string): string {
   throw new Error('unable to determine current release tag; pass --current-tag or set GITHUB_REF_NAME');
 }
 
+function isAncestorTag(cwd: string, possibleAncestor: string, currentTag: string): boolean {
+  const result = spawnSync('git', ['merge-base', '--is-ancestor', possibleAncestor, currentTag], {
+    cwd,
+    encoding: 'utf-8',
+    stdio: 'pipe',
+  });
+  return result.status === 0;
+}
+
 export function resolvePreviousTag(cwd: string, currentTag: string, explicit?: string): string | undefined {
   if (explicit) return explicit;
   const tags = runGit(['tag', '--list', 'v*', '--sort=-v:refname'], cwd, true)
@@ -83,8 +92,10 @@ export function resolvePreviousTag(cwd: string, currentTag: string, explicit?: s
     .filter(Boolean);
   if (tags.length === 0) return undefined;
   const currentIndex = tags.indexOf(currentTag);
-  if (currentIndex >= 0) return tags.slice(currentIndex + 1).find(Boolean);
-  return tags.find((tag) => tag !== currentTag);
+  const candidates = currentIndex >= 0
+    ? tags.slice(currentIndex + 1)
+    : tags.filter((tag) => tag !== currentTag);
+  return candidates.find((tag) => isAncestorTag(cwd, tag, currentTag));
 }
 
 function verifyGitCommitRef(cwd: string, ref: string, label: string): void {

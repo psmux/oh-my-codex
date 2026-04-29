@@ -139,6 +139,47 @@ describe('generate-release-body', () => {
   });
 
 
+  it('skips off-ancestry semver-previous tags when auto-resolving the compare base', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omx-generate-release-body-off-ancestry-'));
+    try {
+      git(root, ['init']);
+      git(root, ['config', 'user.name', 'Release Bot']);
+      git(root, ['config', 'user.email', 'release@example.com']);
+      await writeFile(join(root, 'notes.txt'), 'base\n');
+      git(root, ['add', '.']);
+      git(root, ['commit', '-m', 'base']);
+      git(root, ['tag', 'v0.14.3']);
+
+      await writeFile(join(root, 'notes.txt'), 'dev train\n');
+      git(root, ['add', 'notes.txt']);
+      git(root, ['commit', '-m', 'dev train']);
+      git(root, ['tag', 'v0.15.1']);
+
+      git(root, ['checkout', '-b', 'side-release', 'v0.14.3']);
+      await writeFile(join(root, 'side.txt'), 'side release\n');
+      git(root, ['add', 'side.txt']);
+      git(root, ['commit', '-m', 'side release']);
+      git(root, ['tag', 'v0.15.0']);
+      git(root, ['checkout', 'v0.15.1']);
+
+      await writeFile(join(root, 'RELEASE_BODY.md'), TEMPLATE);
+      await generateReleaseBody({
+        cwd: root,
+        templatePath: 'RELEASE_BODY.md',
+        outPath: 'RELEASE_BODY.generated.md',
+        currentTag: 'v0.15.1',
+        repo: 'example/oh-my-codex',
+      });
+
+      const generated = await readFile(join(root, 'RELEASE_BODY.generated.md'), 'utf-8');
+      assert.match(generated, /`v0\.14\.3\.\.\.v0\.15\.1`/);
+      assert.doesNotMatch(generated, /`v0\.15\.0\.\.\.v0\.15\.1`/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+
   it('rejects missing or inverted compare refs before rendering a compare link', async () => {
     const root = await mkdtemp(join(tmpdir(), 'omx-generate-release-body-range-'));
     try {
