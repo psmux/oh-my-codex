@@ -665,7 +665,7 @@ describe("codex native hook dispatch", () => {
       assert.match(additionalContext, /\[Execution environment\]/);
       assert.match(additionalContext, /attached tmux runtime/);
       assert.match(additionalContext, /omx team, omx hud, and omx quest(?:ion) are directly usable in this session/);
-      assert.match(additionalContext, /visible renderer available from the current pane/);
+      assert.match(additionalContext, /visible temporary renderer available from the current pane; primary success JSON is answers\[\]/);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -4915,7 +4915,7 @@ esac
           "Deep interview is still active (phase: intent-first) and has a pending structured question obligation; use `omx question` before stopping.",
         stopReason: "deep_interview_question_required",
         systemMessage:
-          "OMX deep-interview is still active (phase: intent-first) and requires a structured question via omx question before stopping.",
+          "OMX deep-interview is still active (phase: intent-first) and requires a structured question via omx question before stopping; read the returned answers[] JSON before continuing.",
       });
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -4971,7 +4971,7 @@ esac
           "Deep interview is still active (phase: intent-first) and has a pending structured question obligation; use `omx question` before stopping.",
         stopReason: "deep_interview_question_required",
         systemMessage:
-          "OMX deep-interview is still active (phase: intent-first) and requires a structured question via omx question before stopping.",
+          "OMX deep-interview is still active (phase: intent-first) and requires a structured question via omx question before stopping; read the returned answers[] JSON before continuing.",
       });
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -5099,7 +5099,7 @@ esac
           "Deep interview is still active (phase: intent-first) and has a pending structured question obligation; use `omx question` before stopping.",
         stopReason: "deep_interview_question_required",
         systemMessage:
-          "OMX deep-interview is still active (phase: intent-first) and requires a structured question via omx question before stopping.",
+          "OMX deep-interview is still active (phase: intent-first) and requires a structured question via omx question before stopping; read the returned answers[] JSON before continuing.",
       };
 
       const first = await dispatchCodexNativeHook(payload, { cwd });
@@ -5245,7 +5245,7 @@ esac
           "Deep interview is still active (phase: intent-first) and has a pending structured question obligation; use `omx question` before stopping.",
         stopReason: "deep_interview_question_required",
         systemMessage:
-          "OMX deep-interview is still active (phase: intent-first) and requires a structured question via omx question before stopping.",
+          "OMX deep-interview is still active (phase: intent-first) and requires a structured question via omx question before stopping; read the returned answers[] JSON before continuing.",
       });
     } finally {
       await rm(cwd, { recursive: true, force: true });

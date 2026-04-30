@@ -153,7 +153,7 @@ describe("deep-interview Ouroboros contract", () => {
 		assert.match(deepInterviewSkill, /omx question/i);
 		assert.match(
 			deepInterviewSkill,
-			/required `AskUserQuestion` equivalent/i,
+			/required structured-question equivalent/i,
 		);
 		assert.match(
 			deepInterviewSkill,
@@ -244,7 +244,7 @@ describe("deep-interview Ouroboros contract", () => {
 		);
 		assert.match(
 			deepInterviewSkill,
-			/For `multi-answerable`, treat `answer\.selected_values` as the source of truth/i,
+			/For `multi-answerable`, treat the selected-values field inside `answers\[0\]\.answer` as the source of truth/i,
 		);
 	});
 

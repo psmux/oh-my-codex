@@ -2,7 +2,7 @@
  * Consensus mode execution handoff regression tests
  *
  * Verifies that the plan skill's consensus mode (ralplan) mandates:
- * 1. Structured AskUserQuestion for approval (not plain text)
+ * 1. Structured question UI for approval (not plain text)
  * 2. Explicit $ralph invocation on approval
  * 3. Prohibition of direct implementation from the planning agent
  * 4. User feedback step after Planner but before Architect/Critic
@@ -49,12 +49,12 @@ function extractSection(content: string, heading: string): string | undefined {
 }
 
 describe('Consensus mode execution handoff (plan/SKILL.md)', () => {
-  it('should mandate AskUserQuestion for the approval step', () => {
+  it('should mandate structured question UI for the approval step', () => {
     const consensusSection = extractSection(planSkill, 'Consensus Mode');
     assert.ok(consensusSection, 'Consensus Mode section should exist');
     assert.ok(
-      consensusSection.includes('AskUserQuestion'),
-      'Consensus mode should mandate AskUserQuestion'
+      consensusSection.includes('structured question UI'),
+      'Consensus mode should mandate structured question UI'
     );
   });
 
@@ -174,12 +174,12 @@ describe('User feedback step between Planner and Architect/Critic (plan/SKILL.md
     assert.ok(architectIdx > feedbackIdx, 'Architect should come after User feedback');
   });
 
-  it('should mandate AskUserQuestion for the user feedback step', () => {
+  it('should mandate structured question UI for the user feedback step', () => {
     const consensusSection = extractSection(planSkill, 'Consensus Mode');
     assert.ok(consensusSection, 'Consensus Mode section should exist');
     assert.ok(
-      /User feedback.*MUST.*AskUserQuestion/s.test(consensusSection),
-      'User feedback step should mandate AskUserQuestion'
+      /User feedback.*MUST.*structured question UI/s.test(consensusSection),
+      'User feedback step should mandate structured question UI'
     );
   });
 
