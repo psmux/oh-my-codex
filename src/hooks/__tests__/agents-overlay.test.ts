@@ -21,6 +21,11 @@ import {
   removeSessionModelInstructionsFile,
   sessionModelInstructionsPath,
 } from "../agents-overlay.js";
+import {
+  OMX_GENERATED_AGENTS_MARKER,
+  OMX_MANAGED_AGENTS_END_MARKER,
+  OMX_MANAGED_AGENTS_START_MARKER,
+} from "../../utils/agents-md.js";
 
 const RUNTIME_START = "<!-- OMX:RUNTIME:START -->";
 const RUNTIME_END = "<!-- OMX:RUNTIME:END -->";
@@ -791,6 +796,94 @@ describe("session-scoped model instructions file", () => {
 
     assert.ok(sessionContent.includes("<!-- OMX:RUNTIME:START -->"));
     assert.ok(sessionContent.includes("<!-- OMX:RUNTIME:END -->"));
+    assert.doesNotMatch(sessionContent, /omx:generated:agents-md/);
+  });
+
+  it("omits pure generated OMX project AGENTS from the session model instructions file", async () => {
+    await mkdir(join(tempDir, "home", ".codex"), { recursive: true });
+    await rm(join(tempDir, "home", ".codex", "AGENTS.md"), { force: true });
+    await writeFile(
+      join(tempDir, "AGENTS.md"),
+      [
+        "<!-- AUTONOMY DIRECTIVE — DO NOT REMOVE -->",
+        "YOU ARE AN AUTONOMOUS CODING AGENT.",
+        "<!-- END AUTONOMY DIRECTIVE -->",
+        OMX_GENERATED_AGENTS_MARKER,
+        "",
+        "# oh-my-codex - Intelligent Multi-Agent Orchestration",
+        "",
+        "Generated orchestration brain.",
+      ].join("\n"),
+    );
+
+    const overlay = await generateOverlay(tempDir, "session-generated");
+    const writtenPath = await writeSessionModelInstructionsFile(
+      tempDir,
+      "session-generated",
+      overlay,
+    );
+    const sessionContent = await readFile(writtenPath, "utf-8");
+
+    assert.doesNotMatch(sessionContent, /Generated orchestration brain/);
+    assert.doesNotMatch(sessionContent, /omx:generated:agents-md/);
+    assert.match(sessionContent, /<!-- OMX:RUNTIME:START -->/);
+  });
+
+  it("preserves real unmarked project AGENTS guidance distinct from generated session AGENTS", async () => {
+    await mkdir(join(tempDir, "home", ".codex"), { recursive: true });
+    await rm(join(tempDir, "home", ".codex", "AGENTS.md"), { force: true });
+    await writeFile(
+      join(tempDir, "AGENTS.md"),
+      "# Real project AGENTS\n\nPreserve this project guidance.\n",
+    );
+
+    const overlay = await generateOverlay(tempDir, "session-real-project");
+    const writtenPath = await writeSessionModelInstructionsFile(
+      tempDir,
+      "session-real-project",
+      overlay,
+    );
+    const sessionContent = await readFile(writtenPath, "utf-8");
+
+    assert.match(sessionContent, /# Real project AGENTS/);
+    assert.match(sessionContent, /Preserve this project guidance\./);
+    assert.match(sessionContent, /<!-- OMX:RUNTIME:START -->/);
+  });
+
+  it("strips only generated OMX managed blocks from merged AGENTS files", async () => {
+    await mkdir(join(tempDir, "home", ".codex"), { recursive: true });
+    await rm(join(tempDir, "home", ".codex", "AGENTS.md"), { force: true });
+    await writeFile(
+      join(tempDir, "AGENTS.md"),
+      [
+        "# Team AGENTS",
+        "",
+        "Preserve header guidance.",
+        "",
+        OMX_MANAGED_AGENTS_START_MARKER,
+        OMX_GENERATED_AGENTS_MARKER,
+        "# oh-my-codex - Intelligent Multi-Agent Orchestration",
+        "Generated managed block.",
+        OMX_MANAGED_AGENTS_END_MARKER,
+        "",
+        "Preserve footer guidance.",
+      ].join("\n"),
+    );
+
+    const overlay = await generateOverlay(tempDir, "session-merged-project");
+    const writtenPath = await writeSessionModelInstructionsFile(
+      tempDir,
+      "session-merged-project",
+      overlay,
+    );
+    const sessionContent = await readFile(writtenPath, "utf-8");
+
+    assert.match(sessionContent, /# Team AGENTS/);
+    assert.match(sessionContent, /Preserve header guidance\./);
+    assert.match(sessionContent, /Preserve footer guidance\./);
+    assert.doesNotMatch(sessionContent, /Generated managed block/);
+    assert.doesNotMatch(sessionContent, /omx:generated:agents-md/);
+    assert.match(sessionContent, /<!-- OMX:RUNTIME:START -->/);
   });
 
   it("removes session-scoped file without touching project AGENTS.md", async () => {

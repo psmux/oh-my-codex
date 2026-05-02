@@ -31,12 +31,24 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-async function waitFor(predicate: () => boolean, attempts = 20): Promise<void> {
-  for (let index = 0; index < attempts; index += 1) {
-    if (predicate()) return;
-    await flush();
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+async function withTimeout(promise: Promise<void>, message: string, timeoutMs = 1000): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  assert.ok(predicate(), 'condition should become true before timeout');
 }
 
 afterEach(() => {
@@ -82,10 +94,9 @@ describe('runWatchMode', () => {
     let callCount = 0;
     let inFlight = 0;
     let maxInFlight = 0;
-    let releaseFirstRender: (() => void) | undefined;
-    const firstRenderGate = new Promise<void>((resolve) => {
-      releaseFirstRender = resolve;
-    });
+    const firstRenderGate = deferred();
+    const firstReadStarted = deferred();
+    const secondReadStarted = deferred();
 
     const promise = runWatchMode('/tmp', WATCH_FLAGS, {
       isTTY: true,
@@ -96,7 +107,10 @@ describe('runWatchMode', () => {
         maxInFlight = Math.max(maxInFlight, inFlight);
         try {
           if (callCount === 1) {
-            await firstRenderGate;
+            firstReadStarted.resolve();
+            await firstRenderGate.promise;
+          } else if (callCount === 2) {
+            secondReadStarted.resolve();
           }
           return emptyCtx();
         } finally {
@@ -117,13 +131,14 @@ describe('runWatchMode', () => {
 
     await flush();
     assert.ok(timerTick, 'interval tick should be registered');
+    await withTimeout(firstReadStarted.promise, 'first render should start before exercising queued ticks');
 
-    // Trigger multiple ticks while first render is still blocked.
+    // Trigger multiple ticks while first render is deterministically blocked.
     timerTick?.();
     timerTick?.();
 
-    releaseFirstRender?.();
-    await waitFor(() => callCount === 2);
+    firstRenderGate.resolve();
+    await withTimeout(secondReadStarted.promise, 'queued rerender should start after first render is released');
 
     sigintHandler?.();
     await promise;

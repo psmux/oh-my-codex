@@ -6,6 +6,7 @@
 import { execFileSync, spawn } from "child_process";
 import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { copyFile, cp, lstat, mkdir, readdir, rm, symlink } from "fs/promises";
 import { constants as osConstants } from "os";
 import { setup, SETUP_SCOPES, type SetupInstallMode, type SetupScope } from "./setup.js";
 import { uninstall } from "./uninstall.js";
@@ -580,6 +581,90 @@ function resolveTmuxExecutableForLaunch(): string {
   return resolveTmuxBinaryForPlatform() || "tmux";
 }
 
+
+export interface PreparedCodexHomeForLaunch {
+  codexHomeOverride?: string;
+  projectLocalCodexHomeForCleanup?: string;
+  runtimeCodexHomeForCleanup?: string;
+}
+
+export function runtimeCodexHomePath(cwd: string, sessionId: string): string {
+  return join(cwd, ".omx", "runtime", "codex-home", sessionId);
+}
+
+async function linkOrCopyCodexHomeEntry(source: string, destination: string): Promise<void> {
+  const stat = await lstat(source);
+  try {
+    await symlink(source, destination, stat.isDirectory() && process.platform === "win32" ? "junction" : undefined);
+  } catch {
+    if (stat.isDirectory()) {
+      await cp(source, destination, { recursive: true, force: true, verbatimSymlinks: true });
+      return;
+    }
+    await copyFile(source, destination);
+  }
+}
+
+/**
+ * Project-scope setup keeps durable Codex config under <repo>/.codex, but the
+ * Codex TUI also stores model-availability NUX counters in CODEX_HOME/config.toml.
+ * Launch against a session mirror so those runtime writes never dirty the
+ * durable project config while preserving the project config as the launch input.
+ */
+export async function prepareRuntimeCodexHomeForProjectLaunch(
+  cwd: string,
+  sessionId: string,
+  projectCodexHome: string,
+): Promise<string> {
+  const runtimeCodexHome = runtimeCodexHomePath(cwd, sessionId);
+  await rm(runtimeCodexHome, { recursive: true, force: true });
+  await mkdir(runtimeCodexHome, { recursive: true });
+
+  if (!existsSync(projectCodexHome)) return runtimeCodexHome;
+
+  for (const entry of await readdir(projectCodexHome, { withFileTypes: true })) {
+    const source = join(projectCodexHome, entry.name);
+    const destination = join(runtimeCodexHome, entry.name);
+    if (entry.name === "config.toml") {
+      await copyFile(source, destination);
+      continue;
+    }
+    await linkOrCopyCodexHomeEntry(source, destination);
+  }
+
+  return runtimeCodexHome;
+}
+
+export async function prepareCodexHomeForLaunch(
+  cwd: string,
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<PreparedCodexHomeForLaunch> {
+  const projectLocalCodexHomeForCleanup = resolveProjectLocalCodexHomeForLaunch(cwd, env);
+  if (projectLocalCodexHomeForCleanup) {
+    const runtimeCodexHome = await prepareRuntimeCodexHomeForProjectLaunch(
+      cwd,
+      sessionId,
+      projectLocalCodexHomeForCleanup,
+    );
+    return {
+      codexHomeOverride: runtimeCodexHome,
+      projectLocalCodexHomeForCleanup,
+      runtimeCodexHomeForCleanup: runtimeCodexHome,
+    };
+  }
+
+  return {
+    codexHomeOverride: resolveCodexHomeForLaunch(cwd, env),
+    projectLocalCodexHomeForCleanup,
+  };
+}
+
+async function cleanupRuntimeCodexHome(runtimeCodexHomeForCleanup?: string): Promise<void> {
+  if (!runtimeCodexHomeForCleanup) return;
+  await rm(runtimeCodexHomeForCleanup, { recursive: true, force: true });
+}
+
 function execTmuxFileSync(
   args: string[],
   options?: Parameters<typeof execFileSync>[2],
@@ -622,6 +707,16 @@ function tmuxFailureMessage(error: unknown): string {
     typeof err.stdout === "string" ? err.stdout : err.stdout?.toString();
   const detail = (stderr || stdout || err.message || String(error)).trim();
   return detail.replace(/\s+/g, " ");
+}
+
+function isUnsupportedTmuxExtendedKeysFailure(error: unknown): boolean {
+  const message = tmuxFailureMessage(error).toLowerCase();
+  return (
+    message.includes("extended-keys") &&
+    /(?:invalid|unknown|unsupported) (?:option|flag|argument)|no such option|unknown option/.test(
+      message,
+    )
+  );
 }
 
 function isBenignMissingTmuxServerMessage(message: string): boolean {
@@ -1126,14 +1221,13 @@ export async function launchWithHud(args: string[]): Promise<void> {
     notifyTempResult.passthroughArgs,
     process.env,
   );
-  const codexHomeOverride = resolveCodexHomeForLaunch(launchCwd, process.env);
-  const projectLocalCodexHomeForCleanup = resolveProjectLocalCodexHomeForLaunch(launchCwd, process.env);
+  const persistentCodexHomeForLaunch = resolveCodexHomeForLaunch(launchCwd, process.env);
   const { launchPolicy, effectiveExplicitLaunchPolicy } =
     resolveTmuxAwareLaunchPolicy(explicitLaunchPolicy, isNativeWindows());
   const enableNotifyFallbackAuthority = launchPolicy === "direct";
   const workerSparkModel = resolveWorkerSparkModel(
     notifyTempResult.passthroughArgs,
-    codexHomeOverride,
+    persistentCodexHomeForLaunch,
   );
   const normalizedArgs = normalizeCodexLaunchArgs(
     notifyTempResult.passthroughArgs,
@@ -1165,7 +1259,6 @@ export async function launchWithHud(args: string[]): Promise<void> {
     }
   }
   const sessionId = `omx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
   try {
     await maybeCheckAndPromptUpdate(cwd);
   } catch (err) {
@@ -1196,6 +1289,10 @@ export async function launchWithHud(args: string[]): Promise<void> {
     // Non-fatal: repair failure must not block launch
   }
 
+  const preparedCodexHome = await prepareCodexHomeForLaunch(launchCwd, sessionId, process.env);
+  const codexHomeOverride = preparedCodexHome.codexHomeOverride;
+  const projectLocalCodexHomeForCleanup = preparedCodexHome.projectLocalCodexHomeForCleanup;
+
   // ── Phase 1: preLaunch ──────────────────────────────────────────────────
   try {
     await preLaunch(cwd, sessionId, notifyTempResult.contract, codexHomeOverride, enableNotifyFallbackAuthority, worktreeDirty);
@@ -1207,11 +1304,12 @@ export async function launchWithHud(args: string[]): Promise<void> {
   }
 
   // ── Phase 2: run ────────────────────────────────────────────────────────
+  let postLaunchHandledExternally = false;
   try {
     const notifyTempContractRaw = notifyTempResult.contract.active
       ? serializeNotifyTempContract(notifyTempResult.contract)
       : null;
-    runCodex(
+    const launchResult = runCodex(
       cwd,
       normalizedArgs,
       sessionId,
@@ -1219,10 +1317,16 @@ export async function launchWithHud(args: string[]): Promise<void> {
       codexHomeOverride,
       notifyTempContractRaw,
       effectiveExplicitLaunchPolicy,
+      projectLocalCodexHomeForCleanup,
+      preparedCodexHome.runtimeCodexHomeForCleanup,
     );
+    postLaunchHandledExternally = launchResult.postLaunchHandledExternally;
   } finally {
     // ── Phase 3: postLaunch ─────────────────────────────────────────────
-    await postLaunch(cwd, sessionId, codexHomeOverride, enableNotifyFallbackAuthority, projectLocalCodexHomeForCleanup);
+    if (!postLaunchHandledExternally) {
+      await postLaunch(cwd, sessionId, codexHomeOverride, enableNotifyFallbackAuthority, projectLocalCodexHomeForCleanup);
+      await cleanupRuntimeCodexHome(preparedCodexHome.runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
+    }
   }
 }
 
@@ -1233,8 +1337,6 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     parsedWorktree.remainingArgs,
     process.env,
   );
-  const codexHomeOverride = resolveCodexHomeForLaunch(launchCwd, process.env);
-  const projectLocalCodexHomeForCleanup = resolveProjectLocalCodexHomeForLaunch(launchCwd, process.env);
   const normalizedArgs = normalizeCodexLaunchArgs(
     notifyTempResult.passthroughArgs,
   );
@@ -1292,6 +1394,10 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     // Non-fatal
   }
 
+  const preparedCodexHome = await prepareCodexHomeForLaunch(launchCwd, sessionId, process.env);
+  const codexHomeOverride = preparedCodexHome.codexHomeOverride;
+  const projectLocalCodexHomeForCleanup = preparedCodexHome.projectLocalCodexHomeForCleanup;
+
   try {
     await preLaunch(cwd, sessionId, notifyTempResult.contract, codexHomeOverride, true, worktreeDirty);
   } catch (err) {
@@ -1322,6 +1428,7 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     runCodexBlocking(cwd, codexArgs, codexEnv);
   } finally {
     await postLaunch(cwd, sessionId, codexHomeOverride, true, projectLocalCodexHomeForCleanup);
+    await cleanupRuntimeCodexHome(preparedCodexHome.runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
   }
 }
 
@@ -1982,7 +2089,14 @@ function buildDetachedSessionLeaderCommand(
   cwd: string,
   sessionName: string,
   codexCmd: string,
+  sessionId?: string,
+  codexHomeOverride?: string,
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
 ): string {
+  const detachedPostLaunchHelper = sessionId
+    ? `${buildDetachedSessionPostLaunchHelperCommand(cwd, sessionId, codexHomeOverride, projectLocalCodexHomeForCleanup, runtimeCodexHomeForCleanup)} >/dev/null 2>&1 || true;`
+    : "";
   const wrapped = [
     buildTmuxExtendedKeysAcquireShellSnippet(cwd),
     'exec 3<&0;',
@@ -1996,6 +2110,7 @@ function buildDetachedSessionLeaderCommand(
     "fi;",
     'exec 3<&- 2>/dev/null || true;',
     buildTmuxExtendedKeysReleaseShellSnippet(cwd),
+    detachedPostLaunchHelper,
     'if [ "$status" -lt 128 ]; then',
     `tmux kill-session -t "${escapeShellDoubleQuotedValue(sessionName)}" >/dev/null 2>&1 || true;`,
     "fi;",
@@ -2007,6 +2122,37 @@ function buildDetachedSessionLeaderCommand(
     'wait "$omx_codex_pid";',
   ].join(" ");
   return `/bin/sh -c ${quoteShellArg(wrapped)}`;
+}
+
+function buildDetachedSessionPostLaunchHelperCommand(
+  cwd: string,
+  sessionId: string,
+  codexHomeOverride?: string,
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
+): string {
+  const cwdLiteral = JSON.stringify(cwd);
+  const sessionIdLiteral = JSON.stringify(sessionId);
+  const codexHomeLiteral =
+    typeof codexHomeOverride === "string" && codexHomeOverride.length > 0
+      ? JSON.stringify(codexHomeOverride)
+      : "undefined";
+  const projectLocalCleanupLiteral =
+    typeof projectLocalCodexHomeForCleanup === "string" &&
+    projectLocalCodexHomeForCleanup.length > 0
+      ? JSON.stringify(projectLocalCodexHomeForCleanup)
+      : "undefined";
+  const runtimeCodexHomeCleanupLiteral =
+    typeof runtimeCodexHomeForCleanup === "string" &&
+    runtimeCodexHomeForCleanup.length > 0
+      ? JSON.stringify(runtimeCodexHomeForCleanup)
+      : "undefined";
+  const moduleUrlLiteral = JSON.stringify(import.meta.url);
+  const script = [
+    `const mod = await import(${moduleUrlLiteral});`,
+    `await mod.runDetachedSessionPostLaunch(${cwdLiteral}, ${sessionIdLiteral}, ${codexHomeLiteral}, ${projectLocalCleanupLiteral}, ${runtimeCodexHomeCleanupLiteral});`,
+  ].join(" ");
+  return `${quoteShellArg(process.execPath)} --input-type=module -e ${quoteShellArg(script)}`;
 }
 
 type TmuxExecSync = (file: string, args: readonly string[]) => string;
@@ -2067,7 +2213,9 @@ export function acquireTmuxExtendedKeysLease(
     });
     return `${socketPath}\t${leaseId}`;
   } catch (err) {
-    logCliOperationFailure(err);
+    if (!isUnsupportedTmuxExtendedKeysFailure(err)) {
+      logCliOperationFailure(err);
+    }
     return null;
   }
 }
@@ -2120,7 +2268,9 @@ export function releaseTmuxExtendedKeysLease(
       rmSync(leasePath, { force: true });
     });
   } catch (err) {
-    logCliOperationFailure(err);
+    if (!isUnsupportedTmuxExtendedKeysFailure(err)) {
+      logCliOperationFailure(err);
+    }
   }
 }
 
@@ -2172,10 +2322,20 @@ export function buildDetachedSessionBootstrapSteps(
   notifyTempContractRaw?: string | null,
   nativeWindows = false,
   sessionId?: string,
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
 ): DetachedSessionTmuxStep[] {
   const detachedLeaderCmd = nativeWindows
     ? "powershell.exe"
-    : buildDetachedSessionLeaderCommand(cwd, sessionName, codexCmd);
+    : buildDetachedSessionLeaderCommand(
+        cwd,
+        sessionName,
+        codexCmd,
+        sessionId,
+        codexHomeOverride,
+        projectLocalCodexHomeForCleanup,
+        runtimeCodexHomeForCleanup,
+      );
   const newSessionArgs: string[] = [
     "new-session",
     "-d",
@@ -2779,7 +2939,9 @@ function runCodex(
   codexHomeOverride?: string,
   notifyTempContractRaw?: string | null,
   explicitLaunchPolicy?: CodexLaunchPolicy,
-): void {
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
+): { postLaunchHandledExternally: boolean } {
   const launchArgs = injectModelInstructionsBypassArgs(
     cwd,
     args,
@@ -2819,7 +2981,7 @@ function runCodex(
 
   if (isCodexVersionRequest(launchArgs)) {
     runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
-    return;
+    return { postLaunchHandledExternally: false };
   }
 
   if (launchPolicy === "inside-tmux") {
@@ -2880,10 +3042,12 @@ function runCodex(
         killTmuxPane(paneId);
       }
     }
+    return { postLaunchHandledExternally: false };
   } else if (launchPolicy === "direct") {
     // Detached HUD sessions require tmux. Skip the bootstrap entirely when the
     // binary is unavailable so direct launches do not emit noisy ENOENT logs.
     runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+    return { postLaunchHandledExternally: false };
   } else {
     // Not in tmux: create a new tmux session with codex + HUD pane
     const codexCmd = buildTmuxPaneCommand("codex", launchArgs);
@@ -2910,6 +3074,8 @@ function runCodex(
         notifyTempContractRaw,
         nativeWindows,
         sessionId,
+        projectLocalCodexHomeForCleanup,
+        runtimeCodexHomeForCleanup,
       );
       for (const step of bootstrapSteps) {
         const output = execTmuxFileSync(step.args, {
@@ -2996,6 +3162,7 @@ function runCodex(
           }
         }
       }
+      return { postLaunchHandledExternally: !nativeWindows };
     } catch (err) {
       logCliOperationFailure(err);
       if (createdDetachedSession) {
@@ -3016,6 +3183,7 @@ function runCodex(
       }
       // tmux not available or failed, just run codex directly
       runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+      return { postLaunchHandledExternally: false };
     }
   }
 }
@@ -3305,6 +3473,23 @@ async function postLaunch(
     logCliOperationFailure(err);
     // Non-fatal
   }
+}
+
+export async function runDetachedSessionPostLaunch(
+  cwd: string,
+  sessionId: string,
+  codexHomeOverride?: string,
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
+): Promise<void> {
+  await postLaunch(
+    cwd,
+    sessionId,
+    codexHomeOverride,
+    false,
+    projectLocalCodexHomeForCleanup,
+  );
+  await cleanupRuntimeCodexHome(runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
 }
 
 async function emitNativeHookEvent(

@@ -47,6 +47,36 @@ async function setupTeam(name: string): Promise<{ cwd: string; cleanup: () => Pr
   };
 }
 
+async function setupDisplayTeam(
+  internalName: string,
+  displayName: string,
+  sessionId: string,
+  workerCount = 2,
+): Promise<{ cwd: string; cleanup: () => Promise<void> }> {
+  const cwd = await mkdtemp(join(tmpdir(), `omx-interop-${internalName}-`));
+  const previousTeamStateRoot = process.env.OMX_TEAM_STATE_ROOT;
+  const previousSessionId = process.env.OMX_SESSION_ID;
+  delete process.env.OMX_TEAM_STATE_ROOT;
+  process.env.OMX_SESSION_ID = sessionId;
+  await initTeamState(internalName, 'display-name API test', 'executor', workerCount, cwd, undefined, {
+    OMX_SESSION_ID: sessionId,
+  }, {
+    display_name: displayName,
+    requested_name: displayName,
+    identity_source: 'env-session',
+  });
+  return {
+    cwd,
+    cleanup: async () => {
+      if (typeof previousTeamStateRoot === 'string') process.env.OMX_TEAM_STATE_ROOT = previousTeamStateRoot;
+      else delete process.env.OMX_TEAM_STATE_ROOT;
+      if (typeof previousSessionId === 'string') process.env.OMX_SESSION_ID = previousSessionId;
+      else delete process.env.OMX_SESSION_ID;
+      await rm(cwd, { recursive: true, force: true });
+    },
+  };
+}
+
 async function withMailboxCompatHoleRuntime<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
   const fakeBin = join(cwd, 'runtime-bin');
   const runtimePath = join(fakeBin, 'omx-runtime');
@@ -207,6 +237,31 @@ describe('validateCommonFields', () => {
     if (!result.ok) {
       assert.equal(result.error.code, 'operation_failed');
       assert.match(result.error.message, /Invalid team_name/);
+    }
+  });
+
+  it('resolves a long display team_name before applying internal key validation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-api-long-display-'));
+    try {
+      await initTeamState('long-display-aaaaaaaa', 'test task', 'executor', 1, cwd, undefined, { OMX_SESSION_ID: 'session-long' }, {
+        display_name: 'this-is-a-long-display-name-that-exceeds-thirty-chars',
+        requested_name: 'this-is-a-long-display-name-that-exceeds-thirty-chars',
+        identity_source: 'env-session',
+      });
+      const previousSessionId = process.env.OMX_SESSION_ID;
+      try {
+        process.env.OMX_SESSION_ID = 'session-long';
+        const result = await executeTeamApiOperation('list-tasks', {
+          team_name: 'this-is-a-long-display-name-that-exceeds-thirty-chars',
+        }, cwd);
+        assert.equal(result.ok, true);
+        if (result.ok) assert.equal(result.data.count, 0);
+      } finally {
+        if (previousSessionId === undefined) delete process.env.OMX_SESSION_ID;
+        else process.env.OMX_SESSION_ID = previousSessionId;
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
     }
   });
 
@@ -799,6 +854,54 @@ describe('executeTeamApiOperation: list-tasks', () => {
     }
   });
 
+
+  it('resolves display team names from OMX_TEAM_STATE_ROOT when API calls run outside the leader cwd', async () => {
+    const { cwd: leaderCwd, cleanup } = await setupDisplayTeam('api-root-display-11111111', 'api-root-display', 'session-api-root-display');
+    const workerCwd = await mkdtemp(join(tmpdir(), 'omx-interop-api-root-worker-'));
+    try {
+      process.env.OMX_TEAM_STATE_ROOT = join(leaderCwd, '.omx', 'state');
+      await createTask('api-root-display-11111111', { subject: 'From shared root', description: 'D', status: 'pending' }, leaderCwd);
+      const event = await appendTeamEvent('api-root-display-11111111', {
+        type: 'task_completed',
+        worker: 'worker-1',
+        task_id: '1',
+      }, leaderCwd);
+      await writeMonitorSnapshot('api-root-display-11111111', {
+        taskStatusById: { '1': 'pending' },
+        workerAliveByName: { 'worker-1': true, 'worker-2': true },
+        workerStateByName: { 'worker-1': 'idle', 'worker-2': 'working' },
+        workerTurnCountByName: { 'worker-1': 1, 'worker-2': 1 },
+        workerTaskIdByName: { 'worker-1': '1', 'worker-2': '1' },
+        mailboxNotifiedByMessageId: {},
+        completedEventTaskIds: {},
+      }, leaderCwd);
+
+      const listResult = await executeTeamApiOperation('list-tasks', { team_name: 'api-root-display' }, workerCwd);
+      assert.equal(listResult.ok, true);
+      if (!listResult.ok) throw new Error('expected list-tasks to succeed');
+      assert.equal(listResult.data.count, 1);
+      assert.equal((listResult.data.tasks as Array<{ subject?: string }>)[0]?.subject, 'From shared root');
+
+      const eventsResult = await executeTeamApiOperation('read-events', {
+        team_name: 'api-root-display',
+        type: 'task_completed',
+      }, workerCwd);
+      assert.equal(eventsResult.ok, true);
+      if (!eventsResult.ok) throw new Error('expected read-events to succeed');
+      assert.equal(eventsResult.data.count, 1);
+      assert.equal((eventsResult.data.events as Array<{ event_id?: string }>)[0]?.event_id, event.event_id);
+
+      const idleResult = await executeTeamApiOperation('read-idle-state', { team_name: 'api-root-display' }, workerCwd);
+      assert.equal(idleResult.ok, true);
+      if (!idleResult.ok) throw new Error('expected read-idle-state to succeed');
+      assert.equal(idleResult.data.team_name, 'api-root-display-11111111');
+      assert.deepEqual(idleResult.data.idle_workers, ['worker-1']);
+    } finally {
+      await rm(workerCwd, { recursive: true, force: true });
+      await cleanup();
+    }
+  });
+
   it('prefers OMX_TEAM_STATE_ROOT over manifest metadata when resolving the team working directory', async () => {
     const teamName = 'list-tsk-env-root';
     const cwdA = await mkdtemp(join(tmpdir(), 'omx-interop-env-a-'));
@@ -1388,6 +1491,34 @@ describe('executeTeamApiOperation: read-events', () => {
     }
   });
 
+  it('resolves display team names before reading events', async () => {
+    const { cwd, cleanup } = await setupDisplayTeam('evt-display-11111111', 'evt-display', 'session-events-display');
+    try {
+      const event = await appendTeamEvent('evt-display-11111111', {
+        type: 'task_completed',
+        worker: 'worker-1',
+        task_id: '1',
+      }, cwd);
+
+      const result = await executeTeamApiOperation('read-events', {
+        team_name: 'evt-display',
+        type: 'task_completed',
+      }, cwd);
+
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.data.count, 1);
+        assert.equal(result.data.cursor, event.event_id);
+        const events = result.data.events as Array<{ event_id?: string; type?: string; worker?: string }>;
+        assert.equal(events[0]?.event_id, event.event_id);
+        assert.equal(events[0]?.type, 'task_completed');
+        assert.equal(events[0]?.worker, 'worker-1');
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
   it('rejects invalid event filters', async () => {
     const result = await executeTeamApiOperation('read-events', {
       team_name: 'evt-read-invalid',
@@ -1457,6 +1588,38 @@ describe('executeTeamApiOperation: await-event', () => {
       assert.match(result.error.message, /timeout_ms must be a non-negative integer/);
     }
   });
+
+  it('resolves display team names before awaiting events', async () => {
+    const { cwd, cleanup } = await setupDisplayTeam('evt-await-display-111111', 'evt-await-display', 'session-await-display');
+    try {
+      const waitPromise = executeTeamApiOperation('await-event', {
+        team_name: 'evt-await-display',
+        type: 'task_completed',
+        timeout_ms: 500,
+        poll_ms: 25,
+      }, cwd);
+
+      setTimeout(() => {
+        void appendTeamEvent('evt-await-display-111111', {
+          type: 'task_completed',
+          worker: 'worker-1',
+          task_id: '1',
+        }, cwd);
+      }, 25);
+
+      const result = await waitPromise;
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.data.status, 'event');
+        const event = result.data.event as { type?: string; worker?: string; task_id?: string } | null;
+        assert.equal(event?.type, 'task_completed');
+        assert.equal(event?.worker, 'worker-1');
+        assert.equal(event?.task_id, '1');
+      }
+    } finally {
+      await cleanup();
+    }
+  });
 });
 
 // ─── read-idle-state ────────────────────────────────────────────────────────
@@ -1505,6 +1668,34 @@ describe('executeTeamApiOperation: read-idle-state', () => {
         assert.equal(lastAllIdle?.event_id, allIdleEvent.event_id);
         assert.equal(lastAllIdle?.type, 'all_workers_idle');
         assert.equal(lastAllIdle?.worker_count, 2);
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('resolves display team names before reading idle state', async () => {
+    const { cwd, cleanup } = await setupDisplayTeam('idle-display-11111111', 'idle-display', 'session-idle-display');
+    try {
+      await writeMonitorSnapshot('idle-display-11111111', {
+        taskStatusById: {},
+        workerAliveByName: { 'worker-1': true, 'worker-2': true },
+        workerStateByName: { 'worker-1': 'idle', 'worker-2': 'idle' },
+        workerTurnCountByName: { 'worker-1': 1, 'worker-2': 1 },
+        workerTaskIdByName: { 'worker-1': '', 'worker-2': '' },
+        mailboxNotifiedByMessageId: {},
+        completedEventTaskIds: {},
+      }, cwd);
+
+      const result = await executeTeamApiOperation('read-idle-state', {
+        team_name: 'idle-display',
+      }, cwd);
+
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.data.team_name, 'idle-display-11111111');
+        assert.equal(result.data.all_workers_idle, true);
+        assert.deepEqual(result.data.idle_workers, ['worker-1', 'worker-2']);
       }
     } finally {
       await cleanup();
@@ -1600,6 +1791,26 @@ describe('executeTeamApiOperation: read-stall-state', () => {
         const attention = result.data.leader_attention_state as { leader_session_active?: boolean; source?: string } | null;
         assert.equal(attention?.leader_session_active, false);
         assert.equal(attention?.source, 'native_stop');
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('resolves display team names before reading stall state', async () => {
+    const { cwd, cleanup } = await setupDisplayTeam('stall-display-1111111', 'stall-display', 'session-stall-display');
+    try {
+      await sendDirectMessage('stall-display-1111111', 'worker-1', 'leader-fixed', 'please review', cwd);
+
+      const result = await executeTeamApiOperation('read-stall-state', {
+        team_name: 'stall-display',
+      }, cwd);
+
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.data.team_name, 'stall-display-1111111');
+        assert.equal(result.data.leader_attention_pending, true);
+        assert.equal(result.data.unread_leader_message_count, 1);
       }
     } finally {
       await cleanup();
@@ -1998,6 +2209,23 @@ describe('executeTeamApiOperation: orphan-cleanup', () => {
     if (result.ok) {
       assert.equal(result.data.team_name, 'cleanup-orphan');
       assert.equal(result.data.cleanup_mode, 'orphan_cleanup');
+    }
+  });
+
+  it('resolves display team names before orphan cleanup', async () => {
+    const { cwd, cleanup } = await setupDisplayTeam('orphan-display-111111', 'orphan-display', 'session-orphan-display');
+    try {
+      const result = await executeTeamApiOperation('orphan-cleanup', {
+        team_name: 'orphan-display',
+      }, cwd);
+
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.data.team_name, 'orphan-display-111111');
+        assert.equal(result.data.cleanup_mode, 'orphan_cleanup');
+      }
+    } finally {
+      await cleanup();
     }
   });
 

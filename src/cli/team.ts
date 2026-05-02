@@ -10,7 +10,11 @@ import { readTeamEvents, waitForTeamEvent } from '../team/state/events.js';
 import type { TeamEvent } from '../team/state.js';
 import { parseWorktreeMode, type WorktreeMode } from '../team/worktree.js';
 import { classifyTaskSize } from '../hooks/task-size-detector.js';
-import { readApprovedExecutionLaunchHint } from '../planning/artifacts.js';
+import {
+  readApprovedExecutionLaunchHint,
+  readApprovedExecutionLaunchHintOutcome,
+  type ApprovedRepositoryContextSummary,
+} from '../planning/artifacts.js';
 import { routeTaskToRole } from '../team/role-router.js';
 import { allocateTasksToWorkers } from '../team/allocation-policy.js';
 import {
@@ -25,6 +29,7 @@ import {
   type TeamApiOperation,
 } from '../team/api-interop.js';
 import { teamReadConfig as readTeamConfig, teamReadPhase as readTeamPhase } from '../team/team-ops.js';
+import { resolveTeamNameForCurrentContext } from '../team/team-identity.js';
 import { recordLeaderRuntimeActivity } from '../team/leader-activity.js';
 import { readTeamPaneStatus } from '../team/pane-status.js';
 
@@ -39,9 +44,10 @@ interface ParsedTeamArgs {
   explicitWorkerCount: boolean;
   task: string;
   teamName: string;
+  displayName?: string;
   allowRepoAwareDagHandoff: boolean;
+  approvedRepositoryContextSummary?: ApprovedRepositoryContextSummary;
 }
-
 
 interface TeamFollowupContext {
   task: string;
@@ -102,8 +108,12 @@ function resolveApprovedTeamFollowupContext(cwd: string, task: string): TeamFoll
   const shortFollowup = ['team', 'team으로 해줘', 'team으로 해주세요'].includes(normalizedTask);
   if (!shortFollowup) return null;
 
-  const approvedHint = readApprovedExecutionLaunchHint(cwd, 'team');
-  if (!approvedHint) return null;
+  const approvedHintOutcome = readApprovedExecutionLaunchHintOutcome(cwd, 'team');
+  if (approvedHintOutcome.status === 'ambiguous') {
+    throw new Error('approved_execution_hint_ambiguous:team');
+  }
+  if (approvedHintOutcome.status !== 'resolved') return null;
+  const approvedHint = approvedHintOutcome.hint;
 
   const persistedTask = typeof existingTeamState?.task_description === 'string'
     ? existingTeamState.task_description
@@ -705,7 +715,7 @@ function renderTeamPaneStatus(
   }
 }
 
-function parseTeamArgs(args: string[], cwd: string = process.cwd()): ParsedTeamArgs {
+export function parseTeamArgs(args: string[], cwd: string = process.cwd()): ParsedTeamArgs {
   const tokens = [...args];
   let workerCount = 3;
   let agentType = 'executor';
@@ -750,15 +760,29 @@ function parseTeamArgs(args: string[], cwd: string = process.cwd()): ParsedTeamA
     }
   }
 
-  const approvedHint = readApprovedExecutionLaunchHint(cwd, 'team');
+  const approvedHint = readApprovedExecutionLaunchHint(cwd, 'team', { task: effectiveTask });
   const matchesApprovedLaunchHint = approvedHint?.task.trim() === effectiveTask.trim()
     && (approvedHint.workerCount == null || approvedHint.workerCount === workerCount)
     && (approvedHint.agentType == null || approvedHint.agentType === agentType);
   const allowRepoAwareDagHandoff = followupContext != null || matchesApprovedLaunchHint;
+  const approvedRepositoryContextSummary = allowRepoAwareDagHandoff
+    ? approvedHint?.repositoryContextSummary
+    : undefined;
 
   const teamName = sanitizeTeamName(slugifyTask(effectiveTask));
-  return { workerCount, agentType, explicitAgentType, explicitWorkerCount, task: effectiveTask, teamName, allowRepoAwareDagHandoff };
+  return {
+    workerCount,
+    agentType,
+    explicitAgentType,
+    explicitWorkerCount,
+    task: effectiveTask,
+    teamName,
+    displayName: teamName,
+    allowRepoAwareDagHandoff,
+    ...(approvedRepositoryContextSummary ? { approvedRepositoryContextSummary } : {}),
+  };
 }
+
 
 export function parseTeamStartArgs(args: string[]): ParsedTeamStartArgs {
   const parsedWorktree = parseWorktreeMode(args);
@@ -1062,6 +1086,7 @@ async function ensureTeamModeState(
       task_description: parsed.task,
       current_phase: currentPhase,
       team_name: parsed.teamName,
+      display_name: parsed.displayName ?? parsed.teamName,
       agent_count: parsed.workerCount,
       agent_types: roleDistribution,
       available_agent_types: availableAgentTypes,
@@ -1077,6 +1102,7 @@ async function ensureTeamModeState(
     active,
     current_phase: currentPhase,
     team_name: parsed.teamName,
+    display_name: parsed.displayName ?? parsed.teamName,
     agent_count: parsed.workerCount,
     agent_types: roleDistribution,
     available_agent_types: availableAgentTypes,
@@ -1273,8 +1299,9 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
     const name = teamArgs[1];
     const wantsJson = teamArgs.includes('--json');
     if (!name) throw new Error('Usage: omx team status <team-name> [--json]');
-    await recordLeaderRuntimeActivity(cwd, 'team_status', name);
-    const snapshot = await monitorTeam(name, cwd);
+    const resolvedName = resolveTeamNameForCurrentContext(name, cwd);
+    await recordLeaderRuntimeActivity(cwd, 'team_status', resolvedName);
+    const snapshot = await monitorTeam(resolvedName, cwd);
     if (!snapshot) {
       if (wantsJson) {
         console.log(JSON.stringify({
@@ -1290,7 +1317,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
     }
     const tailLines = parseStatusTailLines(teamArgs.slice(2));
     const modelInspect = parseStatusModelInspect(teamArgs.slice(2));
-    const config = await readTeamConfig(name, cwd);
+    const config = await readTeamConfig(resolvedName, cwd);
     const paneStatus = await readTeamPaneStatus(config, cwd, snapshot, tailLines);
     if (wantsJson) {
       console.log(JSON.stringify({
@@ -1352,7 +1379,8 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
       ? Math.max(1, Number.parseInt(teamArgs[timeoutIdx + 1]!, 10) || 0)
       : 30_000;
     const afterEventId = afterIdx >= 0 ? (teamArgs[afterIdx + 1] || '') : '';
-    const config = await readTeamConfig(name, cwd);
+    const resolvedName = resolveTeamNameForCurrentContext(name, cwd);
+    const config = await readTeamConfig(resolvedName, cwd);
     if (!config) {
       if (wantsJson) {
         console.log(JSON.stringify({ team_name: name, status: 'missing', cursor: afterEventId || '', event: null }));
@@ -1362,9 +1390,9 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
       return;
     }
 
-    const baselineCursor = afterEventId || (await readTeamEvents(name, cwd, { wakeableOnly: true }).then((events) => events.at(-1)?.event_id ?? ''));
-    const snapshot = await monitorTeam(name, cwd);
-    const immediateEvent = await readTeamEvents(name, cwd, {
+    const baselineCursor = afterEventId || (await readTeamEvents(resolvedName, cwd, { wakeableOnly: true }).then((events) => events.at(-1)?.event_id ?? ''));
+    const snapshot = await monitorTeam(resolvedName, cwd);
+    const immediateEvent = await readTeamEvents(resolvedName, cwd, {
       afterEventId: baselineCursor || undefined,
       wakeableOnly: true,
     }).then((events) => events[0]);
@@ -1373,7 +1401,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
       immediateEvent
         ? { status: 'event' as const, cursor: immediateEvent.event_id, event: immediateEvent }
         : snapshot && snapshotHasDeadWorkerStall(snapshot)
-          ? await readTeamEvents(name, cwd, { wakeableOnly: true }).then((events) => {
+          ? await readTeamEvents(resolvedName, cwd, { wakeableOnly: true }).then((events) => {
             const latestWakeableEvent = events.at(-1);
             if (latestWakeableEvent) {
               return {
@@ -1382,12 +1410,12 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
                 event: latestWakeableEvent,
               };
             }
-            const fallbackEvent = buildDeadWorkerAwaitEvent(name, snapshot);
+            const fallbackEvent = buildDeadWorkerAwaitEvent(resolvedName, snapshot);
             return fallbackEvent
               ? { status: 'event' as const, cursor: baselineCursor, event: fallbackEvent }
               : { status: 'timeout' as const, cursor: baselineCursor };
           })
-          : await waitForTeamEvent(name, cwd, {
+          : await waitForTeamEvent(resolvedName, cwd, {
             afterEventId: baselineCursor || undefined,
             timeoutMs,
             pollMs: 100,
@@ -1396,7 +1424,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
 
     if (wantsJson) {
       console.log(JSON.stringify({
-        team_name: sanitizeTeamName(name),
+        team_name: resolvedName,
         status: result.status,
         cursor: result.cursor,
         event: result.event ?? null,
@@ -1411,7 +1439,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
 
     const event = result.event!;
     const context = [
-      `team=${name}`,
+      `team=${resolvedName}`,
       `event=${event.type}`,
       `worker=${event.worker}`,
       event.state ? `state=${event.state}` : '',
@@ -1438,6 +1466,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
       explicitAgentType: false,
       explicitWorkerCount: false,
       teamName: runtime.teamName,
+      displayName: runtime.config.display_name ?? runtime.teamName,
       allowRepoAwareDagHandoff: false,
     });
     const availableAgentTypes = await resolveAvailableAgentTypes(cwd);
@@ -1454,10 +1483,11 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
     if (!name) throw new Error('Usage: omx team shutdown <team-name> [--force] [--confirm-issues]');
     const force = teamArgs.includes('--force');
     const confirmIssues = teamArgs.includes('--confirm-issues');
-    const configBeforeShutdown = await readTeamConfig(name, cwd);
-    const summary = await shutdownTeam(name, cwd, { force, confirmIssues });
+    const resolvedName = resolveTeamNameForCurrentContext(name, cwd);
+    const configBeforeShutdown = await readTeamConfig(resolvedName, cwd);
+    const summary = await shutdownTeam(resolvedName, cwd, { force, confirmIssues });
     await persistTeamShutdownModeState(
-      name,
+      resolvedName,
       cwd,
       configBeforeShutdown
         ? {
@@ -1490,6 +1520,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
     cwd,
     buildLegacyPlan: buildTeamExecutionPlan,
     allowDagHandoff: parsed.allowRepoAwareDagHandoff,
+    approvedRepositoryContextSummary: parsed.approvedRepositoryContextSummary,
   });
   const tasks = executionPlan.tasks;
   const effectiveParsed = executionPlan.workerCount === parsed.workerCount
@@ -1510,6 +1541,6 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
     { worktreeMode, decompositionMetadata: executionPlan.metadata },
   );
 
-  await ensureTeamModeState(effectiveParsed, tasks);
+  await ensureTeamModeState({ ...effectiveParsed, teamName: runtime.teamName, displayName: runtime.config.display_name ?? effectiveParsed.displayName }, tasks);
   await renderStartSummary(runtime, staffingPlan);
 }

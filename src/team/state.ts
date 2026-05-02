@@ -96,6 +96,9 @@ export interface TeamConfig {
   resize_hook_target: string | null;
   /** Monotonic counter for worker index assignment during scaling. */
   next_worker_index?: number;
+  display_name?: string;
+  requested_name?: string;
+  identity_source?: string;
 }
 
 export interface WorkerInfo {
@@ -282,12 +285,18 @@ export interface TeamManifestV2 {
   resize_hook_target: string | null;
   /** Monotonic counter for worker index assignment during scaling. */
   next_worker_index?: number;
+  display_name?: string;
+  requested_name?: string;
+  identity_source?: string;
 }
 
 export interface TeamWorkspaceMetadata {
   leader_cwd?: string;
   team_state_root?: string;
   workspace_mode?: 'single' | 'worktree';
+  display_name?: string;
+  requested_name?: string;
+  identity_source?: string;
   worktree_mode?: WorktreeMode;
 }
 
@@ -581,7 +590,14 @@ function resolveTeamStateRoot(cwd: string, env: NodeJS.ProcessEnv = process.env)
   return omxStateDir(cwd);
 }
 
+function assertSafeTeamName(teamName: string): void {
+  if (!TEAM_NAME_SAFE_PATTERN.test(teamName)) {
+    throw new Error(`invalid_team_name:${teamName}`);
+  }
+}
+
 function teamDir(teamName: string, cwd: string): string {
+  assertSafeTeamName(teamName);
   return join(resolveTeamStateRoot(cwd), 'team', teamName);
 }
 
@@ -803,6 +819,9 @@ export async function initTeamState(
     resize_hook_name: null,
     resize_hook_target: null,
     next_worker_index: workerCount + 1,
+    display_name: workspace.display_name,
+    requested_name: workspace.requested_name,
+    identity_source: workspace.identity_source,
   };
 
   await writeAtomic(join(root, 'config.json'), JSON.stringify(config, null, 2));
@@ -845,6 +864,9 @@ export async function initTeamState(
       resize_hook_name: null,
       resize_hook_target: null,
       next_worker_index: workerCount + 1,
+      display_name: workspace.display_name,
+      requested_name: workspace.requested_name,
+      identity_source: workspace.identity_source,
     },
     cwd
   );
@@ -876,6 +898,9 @@ async function writeConfig(cfg: TeamConfig, cwd: string): Promise<void> {
       resize_hook_name: normalized.resize_hook_name,
       resize_hook_target: normalized.resize_hook_target,
       next_worker_index: normalized.next_worker_index ?? existing.next_worker_index,
+      display_name: normalized.display_name ?? existing.display_name,
+      requested_name: normalized.requested_name ?? existing.requested_name,
+      identity_source: normalized.identity_source ?? existing.identity_source,
     };
     await writeTeamManifestV2(merged, cwd);
   }
@@ -908,6 +933,9 @@ function teamConfigFromManifest(manifest: TeamManifestV2): TeamConfig {
     resize_hook_name: manifest.resize_hook_name,
     resize_hook_target: manifest.resize_hook_target,
     next_worker_index: manifest.next_worker_index,
+    display_name: manifest.display_name,
+    requested_name: manifest.requested_name,
+    identity_source: manifest.identity_source,
   };
 }
 
@@ -958,6 +986,9 @@ function teamManifestFromConfig(config: TeamConfig): TeamManifestV2 {
     resize_hook_name: normalized.resize_hook_name,
     resize_hook_target: normalized.resize_hook_target,
     next_worker_index: normalized.next_worker_index,
+    display_name: normalized.display_name,
+    requested_name: normalized.requested_name,
+    identity_source: normalized.identity_source,
   };
 }
 

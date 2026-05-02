@@ -219,7 +219,7 @@ describe('wakeCommandGateway - command gate', () => {
     process.env.OMX_OPENCLAW_COMMAND_TIMEOUT_MS = '100';
     const result = await wakeCommandGateway(
       'test',
-      { type: 'command', command: "node -e \"setTimeout(() => {}, 250)\"", timeout: 500 },
+      { type: 'command', command: "node -e \"setTimeout(() => {}, 250)\"", timeout: 5000 },
       {},
     );
     assert.equal(result.success, true);

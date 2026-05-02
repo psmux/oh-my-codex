@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { ensureCanonicalRalphArtifacts, recordRalphVisualFeedback } from '../persistence.js';
 import { VISUAL_NEXT_ACTIONS_LIMIT } from '../../visual/constants.js';
 
@@ -57,6 +57,10 @@ describe('ensureCanonicalRalphArtifacts', () => {
       assert.ok(result.canonicalPrdPath);
       assert.equal(existsSync(result.canonicalPrdPath!), true);
       assert.equal(existsSync(result.canonicalProgressPath), true);
+      assert.match(
+        basename(result.canonicalPrdPath!),
+        /^prd-\d{8}T\d{6}Z-legacy-ralph-project(?:-\d+)?\.md$/,
+      );
 
       const canonicalPrd = await readFile(result.canonicalPrdPath!, 'utf-8');
       const canonicalProgress = JSON.parse(await readFile(result.canonicalProgressPath, 'utf-8'));
@@ -69,6 +73,26 @@ describe('ensureCanonicalRalphArtifacts', () => {
       // Legacy artifacts remain untouched for compatibility window.
       assert.equal(await readFile(legacyPrdPath, 'utf-8'), legacyPrdBefore);
       assert.equal(await readFile(legacyProgressPath, 'utf-8'), legacyProgressBefore);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers the newest timestamped canonical PRD when multiple canonical files exist', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-ralph-canonical-order-'));
+    try {
+      const plansDir = join(cwd, '.omx', 'plans');
+      const canonicalProgress = join(cwd, '.omx', 'state', 'ralph-progress.json');
+      await mkdir(plansDir, { recursive: true });
+      await mkdir(join(cwd, '.omx', 'state'), { recursive: true });
+      await writeFile(join(plansDir, 'prd-legacy.md'), '# Legacy canonical PRD\n');
+      await writeFile(join(plansDir, 'prd-20260427T153000Z-alpha.md'), '# Older timestamped PRD\n');
+      await writeFile(join(plansDir, 'prd-20260427T153100Z-alpha.md'), '# Newer timestamped PRD\n');
+      await writeFile(canonicalProgress, JSON.stringify({ canonical: true }, null, 2));
+
+      const result = await ensureCanonicalRalphArtifacts(cwd);
+      assert.equal(result.migratedPrd, false);
+      assert.equal(result.canonicalPrdPath, join(plansDir, 'prd-20260427T153100Z-alpha.md'));
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

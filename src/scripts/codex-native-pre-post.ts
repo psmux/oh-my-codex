@@ -616,6 +616,125 @@ function buildDocumentRefreshPreToolUseOutput(
   return buildDocumentRefreshAdvisoryOutput(warning, "PreToolUse");
 }
 
+
+const SLOPPY_FALLBACK_PHRASE_PATTERNS = [
+  /\bquick hack\b/i,
+  /\bhacky\b/i,
+  /\bworkaround for now\b/i,
+  /\btemporary workaround\b/i,
+  /\btemporary fallback\b/i,
+  /\bjust bypass\b/i,
+  /\bjust skip\b/i,
+  /\bskip (?:the )?(?:failing )?(?:test|validation|checks?)\b/i,
+  /\bfallback if (?:it|this|that) fails\b/i,
+  /\bfor now,? just\b/i,
+  /\bbypass (?:the )?(?:failing )?(?:test|validation|checks?)\b/i,
+] as const;
+
+const SLOPPY_FALLBACK_IMPLEMENTATION_CONTEXT_PATTERNS = [
+  /\badd\b/i,
+  /\bimplement\b/i,
+  /\bpatch\b/i,
+  /\bwrite\b/i,
+  /\bchange\b/i,
+  /\bfix\b/i,
+  /\bbypass\b/i,
+  /\bfallback\b/i,
+  /\bworkaround\b/i,
+  /\bskip\b/i,
+  /\bdisable\b/i,
+] as const;
+
+const SLOPPY_FALLBACK_GROUNDING_PATTERNS = [
+  /\btested\b/i,
+  /\btests? pass(?:ed)?\b/i,
+  /\bnpm (?:run )?test\b/i,
+  /\bnode --test\b/i,
+  /\bunit tests?\b/i,
+  /\bintegration tests?\b/i,
+  /\bregression tests?\b/i,
+  /\bcoverage\b/i,
+  /\bspec(?:ification)?\b/i,
+  /\bADR\b/,
+  /\barchitecture\b/i,
+  /\barchitect\b/i,
+  /\bdesign\b/i,
+  /\bbecause\b/i,
+  /\bcompatib(?:le|ility)\b/i,
+  /\bbackward-compatible\b/i,
+  /\bfail-safe\b/i,
+  /\bfailsafe\b/i,
+  /\benvironment issue\b/i,
+  /\benv(?:ironment)? problem\b/i,
+  /\buser approved\b/i,
+  /\bapproved by (?:the )?user\b/i,
+  /(?:^|\s)#\d+\b/,
+  /\bPR\s*#?\d+\b/i,
+] as const;
+
+const READ_ONLY_COMMAND_TOKENS = new Set([
+  "cat",
+  "find",
+  "grep",
+  "head",
+  "less",
+  "ls",
+  "rg",
+  "sed",
+  "tail",
+]);
+
+function commandStartsWithReadOnlyInspection(command: string): boolean {
+  if (commandHasWriteLikeIntent(command)) return false;
+  const tokens = tokenizeShellCommand(command);
+  if (!tokens || tokens.length === 0) return false;
+  let commandToken = tokens[0] ?? "";
+  if (commandToken === "env") {
+    const nextCommand = tokens.find((token, index) => index > 0 && !token.startsWith("-") && !isInlineShellEnvAssignment(token));
+    commandToken = nextCommand ?? commandToken;
+  }
+  const basename = commandToken.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? commandToken.toLowerCase();
+  if (!READ_ONLY_COMMAND_TOKENS.has(basename)) return false;
+  if (basename === "sed" && tokens.some((token) => token === "-i" || token.startsWith("-i"))) return false;
+  if (basename === "cat" && /(?:^|[;&|]\s*)cat\b[\s\S]{0,200}>\s*[^\s&|;]+/.test(command)) return false;
+  return !/\|\s*(?:sh|bash|zsh|python3?|node|perl|ruby|apply_patch)\b/i.test(command);
+}
+
+function commandHasWriteLikeIntent(command: string): boolean {
+  return /\bapply_patch\b/.test(command)
+    || /(?:^|[;&|]\s*)(?:cat|printf|echo)\b[\s\S]{0,200}>\s*[^\s&|;]+/.test(command)
+    || /\btee\s+(?:-a\s+)?[^\s&|;]+/.test(command)
+    || /\bsed\s+(?:[^\n;&|]*\s)?-i(?:\b|['"])/.test(command)
+    || /\b(?:python3?|node|perl|ruby)\b[\s\S]{0,240}\b(?:writeFileSync|writeFile|write_text|open\([^)]*["']w|File\.write|Path\()/.test(command)
+    || /<<['"]?[A-Za-z0-9_ -]+['"]?[\s\S]*(?:^|\n)(?:\+\+\+\s|---\s|import\s|export\s|function\s|const\s|class\s|interface\s)/m.test(command);
+}
+
+function hasAnyPattern(text: string, patterns: readonly RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function detectSloppyFallbackFraming(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+  if (commandStartsWithReadOnlyInspection(trimmed)) return false;
+  if (!commandHasWriteLikeIntent(trimmed)) return false;
+  if (!hasAnyPattern(trimmed, SLOPPY_FALLBACK_PHRASE_PATTERNS)) return false;
+  if (!hasAnyPattern(trimmed, SLOPPY_FALLBACK_IMPLEMENTATION_CONTEXT_PATTERNS)) return false;
+  if (hasAnyPattern(trimmed, SLOPPY_FALLBACK_GROUNDING_PATTERNS)) return false;
+  return true;
+}
+
+function buildSloppyFallbackPreToolUseOutput(commandText: string): Record<string, unknown> | null {
+  if (!detectSloppyFallbackFraming(commandText)) return null;
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+    },
+    systemMessage:
+      "Sloppy fallback/workaround framing detected: don't make potential slop. Consult an architect for a concrete architecture, or ask the user if this is an environment issue before adding bypass/fallback code.",
+  };
+}
+
 function commandInvokesOmxQuestion(command: string): boolean {
   const tokens = tokenizeShellCommand(command)?.map((token) => token.toLowerCase()) ?? [];
   for (let index = 0; index < tokens.length; index += 1) {
@@ -746,6 +865,8 @@ export function buildNativePreToolUseOutput(
     safeString(payload.cwd).trim() || process.cwd(),
   );
   if (documentRefreshWarning) return documentRefreshWarning;
+  const sloppyFallbackWarning = buildSloppyFallbackPreToolUseOutput(normalized.normalizedCommand);
+  if (sloppyFallbackWarning) return sloppyFallbackWarning;
   if (!matchesDestructiveFixture(normalized.normalizedCommand)) return null;
 
   return {

@@ -400,7 +400,7 @@ export async function handleTeamWorkerPostToolUseSuccess(
     if (readToolName(payload) !== 'Bash') return { handled: false, status: 'skipped', reason: 'not_bash', operationKinds: [] };
     if (readExitCode(payload) !== 0) return { handled: false, status: 'skipped', reason: 'nonzero_exit', operationKinds: [] };
 
-    const parsedWorker = parseTeamWorkerEnv(env.OMX_TEAM_WORKER);
+    const parsedWorker = parseTeamWorkerEnv(env.OMX_TEAM_INTERNAL_WORKER ?? env.OMX_TEAM_WORKER);
     if (!parsedWorker) return { handled: false, status: 'skipped', reason: 'missing_worker_env', operationKinds: [] };
 
     const resolvedStateRoot = await resolveWorkerTeamStateRoot(cwd, parsedWorker, env);

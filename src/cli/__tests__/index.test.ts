@@ -1,7 +1,7 @@
 import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, utimesSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir as fsReaddir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir as fsReaddir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,8 @@ import {
   resolveCodexConfigPathForLaunch,
   resolveCodexHomeForLaunch,
   resolveProjectLocalCodexHomeForLaunch,
+  prepareCodexHomeForLaunch,
+  runtimeCodexHomePath,
   buildDetachedSessionBootstrapSteps,
   buildDetachedTmuxSessionName,
   buildDetachedSessionFinalizeSteps,
@@ -1359,6 +1361,78 @@ describe("project launch scope helpers", () => {
     }
   });
 
+  it("uses a session-scoped CODEX_HOME mirror for project launch config writes", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-launch-runtime-codex-home-"));
+    try {
+      const projectCodexHome = join(wd, ".codex");
+      const configPath = join(projectCodexHome, "config.toml");
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await mkdir(join(projectCodexHome, "agents"), { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+      const originalConfig = [
+        'model = "gpt-5.5"',
+        "",
+        "[tui]",
+        'status_line = ["model-with-reasoning", "git-branch"]',
+        "",
+      ].join("\n");
+      await writeFile(configPath, originalConfig);
+      await writeFile(join(projectCodexHome, "agents", "planner.toml"), 'name = "planner"\n');
+      const beforeStat = await stat(configPath);
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-2033", {});
+      const runtimeCodexHome = runtimeCodexHomePath(wd, "session-2033");
+
+      assert.equal(prepared.codexHomeOverride, runtimeCodexHome);
+      assert.equal(prepared.projectLocalCodexHomeForCleanup, projectCodexHome);
+      assert.equal(prepared.runtimeCodexHomeForCleanup, runtimeCodexHome);
+      assert.equal(await readFile(join(runtimeCodexHome, "config.toml"), "utf-8"), originalConfig);
+      assert.equal(
+        await readFile(join(runtimeCodexHome, "agents", "planner.toml"), "utf-8"),
+        'name = "planner"\n',
+      );
+
+      await writeFile(
+        join(runtimeCodexHome, "config.toml"),
+        `${originalConfig}\n[tui.model_availability_nux]\n"gpt-5.5" = 1\n`,
+      );
+
+      assert.equal(await readFile(configPath, "utf-8"), originalConfig);
+      assert.doesNotMatch(await readFile(configPath, "utf-8"), /model_availability_nux/);
+      assert.equal((await stat(configPath)).mtimeMs, beforeStat.mtimeMs);
+
+      await prepareCodexHomeForLaunch(wd, "session-2033-repeat", {});
+      assert.equal(await readFile(configPath, "utf-8"), originalConfig);
+      assert.equal((await stat(configPath)).mtimeMs, beforeStat.mtimeMs);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps explicit CODEX_HOME persistent instead of creating a runtime mirror", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-launch-runtime-codex-home-"));
+    try {
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-explicit", {
+        CODEX_HOME: "/tmp/explicit-codex-home",
+      });
+
+      assert.equal(prepared.codexHomeOverride, "/tmp/explicit-codex-home");
+      assert.equal(prepared.projectLocalCodexHomeForCleanup, undefined);
+      assert.equal(prepared.runtimeCodexHomeForCleanup, undefined);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it("keeps explicit CODEX_HOME override from env", async () => {
     const wd = await mkdtemp(join(tmpdir(), "omx-launch-scope-"));
     try {
@@ -1741,16 +1815,21 @@ describe("detached tmux new-session sequencing", () => {
       "--model gpt-5",
       "/tmp/codex-home",
       '{"active":true}',
+      false,
+      "omx-session-test",
     );
     assert.deepEqual(
       steps.map((step) => step.name),
-      ["new-session", "split-and-capture-hud-pane"],
+      ["new-session", "tag-session", "split-and-capture-hud-pane"],
     );
-    assert.equal(steps[1]?.args[3], String(HUD_TMUX_HEIGHT_LINES));
-    assert.equal(steps[1]?.args[6], "omx-demo");
-    assert.equal(steps[1]?.args.includes("-P"), true);
-    assert.equal(steps[1]?.args.includes("#{pane_id}"), true);
+    const splitStep = steps.find((step) => step.name === "split-and-capture-hud-pane");
+    assert.ok(splitStep);
+    assert.equal(splitStep.args[3], String(HUD_TMUX_HEIGHT_LINES));
+    assert.equal(splitStep.args[6], "omx-demo");
+    assert.equal(splitStep.args.includes("-P"), true);
+    assert.equal(splitStep.args.includes("#{pane_id}"), true);
     assert.equal(steps[0]?.args.includes("-e"), true);
+    assert.equal(steps[0]?.args.includes("OMX_SESSION_ID=omx-session-test"), true);
     assert.equal(
       steps[0]?.args.includes('OMX_NOTIFY_TEMP_CONTRACT={\"active\":true}'),
       true,
@@ -1896,6 +1975,37 @@ describe("detached tmux new-session sequencing", () => {
     assert.match(leaderCmd!, /tmux kill-session -t/);
     assert.match(leaderCmd!, /"omx-demo"/);
     assert.match(leaderCmd!, /exit \$status/);
+  });
+
+  it("buildDetachedSessionBootstrapSteps finalizes postLaunch inside the detached leader when a session id is available", () => {
+    const steps = buildDetachedSessionBootstrapSteps(
+      "omx-demo",
+      "/tmp/project",
+      "'codex' '--model' 'gpt-5'",
+      "'node' '/tmp/omx.js' 'hud' '--watch'",
+      null,
+      "/tmp/codex-home",
+      null,
+      false,
+      "omx-session-123",
+      "/tmp/project/.codex-project",
+      "/tmp/project/.omx/runtime/codex-home/omx-session-123",
+    );
+    const leaderCmd = steps[0]?.args.at(-1);
+    assert.equal(typeof leaderCmd, "string");
+    assert.match(leaderCmd!, /runDetachedSessionPostLaunch/);
+    assert.match(leaderCmd!, /omx-session-123/);
+    assert.match(leaderCmd!, /\/tmp\/codex-home/);
+    assert.match(leaderCmd!, /\/tmp\/project\/\.codex-project/);
+    assert.match(leaderCmd!, /\/tmp\/project\/\.omx\/runtime\/codex-home\/omx-session-123/);
+    const helperIndex = leaderCmd!.indexOf("runDetachedSessionPostLaunch");
+    const signalGateIndex = leaderCmd!.indexOf('if [ "$status" -lt 128 ]');
+    assert.ok(helperIndex >= 0);
+    assert.ok(signalGateIndex >= 0);
+    assert.ok(
+      helperIndex < signalGateIndex,
+      "detached postLaunch helper must run before the signal-derived tmux kill-session gate",
+    );
   });
 
   it("detached leader command keeps stdin open for the Codex child", async () => {
@@ -2327,6 +2437,72 @@ exit 0
       ["show-options", "-sv", "extended-keys"],
       ["run"],
     ]);
+  });
+
+  it("withTmuxExtendedKeys ignores tmux versions without the extended-keys option", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-tmux-lease-unsupported-"));
+    const calls: string[][] = [];
+    const stderrWrite = mock.method(process.stderr, "write", () => true);
+    try {
+      const result = withTmuxExtendedKeys(
+        cwd,
+        () => {
+          calls.push(["run"]);
+          return "ok";
+        },
+        (_file, args) => {
+          calls.push([...args]);
+          if (args[0] === "display-message") return "/tmp/tmux-3-0.sock\n";
+          if (args[0] === "show-options") {
+            throw Object.assign(new Error("Command failed: tmux show-options -sv extended-keys"), {
+              status: 1,
+              stderr: Buffer.from("invalid option: extended-keys\n"),
+              stdout: Buffer.from(""),
+            });
+          }
+          return "";
+        },
+      );
+
+      assert.equal(result, "ok");
+      assert.deepEqual(calls, [
+        ["display-message", "-p", "#{socket_path}"],
+        ["show-options", "-sv", "extended-keys"],
+        ["run"],
+      ]);
+      assert.equal(stderrWrite.mock.callCount(), 0);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("acquireTmuxExtendedKeysLease returns no lease when extended-keys is unsupported", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-tmux-acquire-unsupported-"));
+    const calls: string[][] = [];
+    const stderrWrite = mock.method(process.stderr, "write", () => true);
+    try {
+      const lease = acquireTmuxExtendedKeysLease(cwd, (_file, args) => {
+        calls.push([...args]);
+        if (args[0] === "display-message") return "/tmp/tmux-3-0.sock\n";
+        if (args[0] === "show-options") {
+          throw Object.assign(new Error("Command failed: tmux show-options -sv extended-keys"), {
+            status: 1,
+            stderr: Buffer.from("invalid option: extended-keys\n"),
+            stdout: Buffer.from(""),
+          });
+        }
+        return "";
+      });
+
+      assert.equal(lease, null);
+      assert.deepEqual(calls, [
+        ["display-message", "-p", "#{socket_path}"],
+        ["show-options", "-sv", "extended-keys"],
+      ]);
+      assert.equal(stderrWrite.mock.callCount(), 0);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it("reapStaleNotifyFallbackWatcher skips kill when process identity does not match a watcher", async () => {

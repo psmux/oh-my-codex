@@ -2420,6 +2420,147 @@ esac
     }
   });
 
+  it("warns on PreToolUse for vague sloppy fallback implementation framing", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-pretool-slop-warn-"));
+    try {
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          tool_name: "Bash",
+          tool_use_id: "tool-slop-warn",
+          tool_input: {
+            command: [
+              "cat > src/runtime.ts <<'EOF'",
+              "export function loadRuntime() {",
+              "  // implement a quick hack fallback if it fails",
+              "  return process.env.RUNTIME || 'local';",
+              "}",
+              "EOF",
+            ].join("\n"),
+          },
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "pre-tool-use");
+      assert.equal((result.outputJson as { decision?: string } | null)?.decision, undefined);
+      assert.equal((result.outputJson as { hookSpecificOutput?: { hookEventName?: string } } | null)?.hookSpecificOutput?.hookEventName, "PreToolUse");
+      assert.match(JSON.stringify(result.outputJson), /don't make potential slop/);
+      assert.match(JSON.stringify(result.outputJson), /architect/);
+      assert.match(JSON.stringify(result.outputJson), /environment issue/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not warn on PreToolUse for read-only fallback text inspection", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-pretool-slop-readonly-"));
+    try {
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          tool_name: "Bash",
+          tool_use_id: "tool-slop-readonly",
+          tool_input: { command: "rg \"quick hack fallback if it fails\" src docs" },
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "pre-tool-use");
+      assert.equal(result.outputJson, null);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("warns when a read-only command is chained before sloppy fallback writes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-pretool-slop-chained-write-"));
+    try {
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          tool_name: "Bash",
+          tool_use_id: "tool-slop-chained-write",
+          tool_input: {
+            command: [
+              "rg foo src && cat > src/runtime.ts <<EOF",
+              "export function loadRuntime() {",
+              "  // implement quick hack fallback if it fails",
+              "  return 'local';",
+              "}",
+              "EOF",
+            ].join("\n"),
+          },
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "pre-tool-use");
+      assert.equal((result.outputJson as { decision?: string } | null)?.decision, undefined);
+      assert.equal((result.outputJson as { hookSpecificOutput?: { hookEventName?: string } } | null)?.hookSpecificOutput?.hookEventName, "PreToolUse");
+      assert.match(JSON.stringify(result.outputJson), /don't make potential slop/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not warn on PreToolUse for grounded compatibility fallback code", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-pretool-slop-grounded-"));
+    try {
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          tool_name: "Bash",
+          tool_use_id: "tool-slop-grounded",
+          tool_input: {
+            command: [
+              "cat > src/compat.ts <<'EOF'",
+              "export function resolveCompatMode() {",
+              "  // temporary fallback because legacy compatibility needs fail-safe startup behavior",
+              "  return 'legacy';",
+              "}",
+              "// Tested: npm test",
+              "EOF",
+            ].join("\n"),
+          },
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "pre-tool-use");
+      assert.equal(result.outputJson, null);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps git commit Lore enforcement ahead of sloppy fallback advisory", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-pretool-slop-git-priority-"));
+    try {
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "PreToolUse",
+          cwd,
+          tool_name: "Bash",
+          tool_use_id: "tool-slop-git-priority",
+          tool_input: { command: 'git commit -m "quick hack fallback if it fails"' },
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "pre-tool-use");
+      assert.equal((result.outputJson as { decision?: string } | null)?.decision, "block");
+      assert.match(JSON.stringify(result.outputJson), /Lore protocol/);
+      assert.doesNotMatch(JSON.stringify(result.outputJson), /don't make potential slop/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("blocks PreToolUse git commit with supported response shape when the inline message is not Lore-compliant", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-pretool-git-commit-invalid-"));
     try {
@@ -3946,7 +4087,7 @@ esac
         team_state_root: join(cwd, ".omx", "state"),
       });
       await writeJson(join(workerDir, "status.json"), {
-        state: "idle",
+        state: "working",
         current_task_id: "1",
         updated_at: new Date().toISOString(),
       });
@@ -3990,6 +4131,72 @@ esac
     }
   });
 
+  it("does not block Stop as a team-worker task failure when worker status is already terminal", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-team-worker-terminal-stale-"));
+    const prevTeamWorker = process.env.OMX_TEAM_WORKER;
+    const prevTeamStateRoot = process.env.OMX_TEAM_STATE_ROOT;
+    const prevLeaderCwd = process.env.OMX_TEAM_LEADER_CWD;
+    try {
+      await initTeamState(
+        "worker-stale-team",
+        "worker stale stop fallback",
+        "executor",
+        1,
+        cwd,
+        undefined,
+        { ...process.env, OMX_SESSION_ID: "sess-stop-team-worker-stale" },
+      );
+      const stateDir = join(cwd, ".omx", "state");
+      const workerCwd = join(cwd, ".omx", "team", "worker-stale-team", "worktrees", "worker-1");
+      const workerDir = join(stateDir, "team", "worker-stale-team", "workers", "worker-1");
+      await mkdir(workerCwd, { recursive: true });
+      await writeJson(join(workerDir, "identity.json"), {
+        name: "worker-1",
+        index: 1,
+        role: "executor",
+        assigned_tasks: ["1"],
+        worktree_path: workerCwd,
+        team_state_root: stateDir,
+      });
+      await writeJson(join(workerDir, "status.json"), {
+        state: "done",
+        current_task_id: "1",
+        updated_at: new Date().toISOString(),
+      });
+      await writeJson(join(stateDir, "team", "worker-stale-team", "tasks", "task-1.json"), {
+        id: "1",
+        subject: "stale hook task",
+        description: "stale task should not trap terminal worker Stop",
+        status: "in_progress",
+        owner: "worker-1",
+        created_at: new Date().toISOString(),
+      });
+
+      process.env.OMX_TEAM_WORKER = "worker-stale-team/worker-1";
+      process.env.OMX_TEAM_STATE_ROOT = stateDir;
+      process.env.OMX_TEAM_LEADER_CWD = cwd;
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd: workerCwd,
+          session_id: "sess-stop-team-worker-stale",
+        },
+        { cwd: workerCwd },
+      );
+
+      assert.equal((result.outputJson as { stopReason?: string } | null)?.stopReason, "team_team-exec");
+    } finally {
+      if (typeof prevTeamWorker === "string") process.env.OMX_TEAM_WORKER = prevTeamWorker;
+      else delete process.env.OMX_TEAM_WORKER;
+      if (typeof prevTeamStateRoot === "string") process.env.OMX_TEAM_STATE_ROOT = prevTeamStateRoot;
+      else delete process.env.OMX_TEAM_STATE_ROOT;
+      if (typeof prevLeaderCwd === "string") process.env.OMX_TEAM_LEADER_CWD = prevLeaderCwd;
+      else delete process.env.OMX_TEAM_LEADER_CWD;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("suppresses identical team worker Stop replays but re-blocks fresh turns and task state changes", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-team-worker-repeat-"));
     try {
@@ -4016,7 +4223,7 @@ esac
         team_state_root: stateDir,
       });
       await writeJson(join(workerDir, "status.json"), {
-        state: "idle",
+        state: "working",
         current_task_id: "1",
         updated_at: new Date().toISOString(),
       });
@@ -4637,6 +4844,100 @@ esac
           hook_event_name: "Stop",
           cwd,
           session_id: "sess-stop-stale-skill",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.equal(result.outputJson, null);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not block on stale ralplan skill-active when canonical run-state is terminal", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-terminal-ralplan-run-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      const sessionId = "sess-stop-terminal-ralplan";
+      await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
+      await writeJson(join(stateDir, "session.json"), { session_id: sessionId });
+      await writeJson(join(stateDir, "sessions", sessionId, "skill-active-state.json"), {
+        active: true,
+        skill: "ralplan",
+        phase: "planning",
+        session_id: sessionId,
+        active_skills: [{
+          skill: "ralplan",
+          phase: "planning",
+          active: true,
+          session_id: sessionId,
+        }],
+      });
+      await writeJson(join(stateDir, "sessions", sessionId, "ralplan-state.json"), {
+        active: true,
+        mode: "ralplan",
+        current_phase: "planning",
+        session_id: sessionId,
+      });
+      await writeJson(join(stateDir, "sessions", sessionId, "run-state.json"), {
+        version: 1,
+        mode: "ralplan",
+        active: false,
+        outcome: "finish",
+        lifecycle_outcome: "finished",
+        current_phase: "complete",
+        completed_at: "2026-05-01T00:00:00.000Z",
+        updated_at: "2026-05-01T00:00:00.000Z",
+      });
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: sessionId,
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.equal(result.outputJson, null);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not block on stale ralplan skill-active when pinned mode state belongs to another session", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-foreign-ralplan-"));
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      const sessionId = "sess-stop-current-ralplan";
+      await mkdir(join(stateDir, "sessions", sessionId), { recursive: true });
+      await writeJson(join(stateDir, "session.json"), { session_id: sessionId });
+      await writeJson(join(stateDir, "sessions", sessionId, "skill-active-state.json"), {
+        active: true,
+        skill: "ralplan",
+        phase: "planning",
+        session_id: sessionId,
+        active_skills: [{
+          skill: "ralplan",
+          phase: "planning",
+          active: true,
+          session_id: sessionId,
+        }],
+      });
+      await writeJson(join(stateDir, "sessions", sessionId, "ralplan-state.json"), {
+        active: true,
+        mode: "ralplan",
+        current_phase: "planning",
+        session_id: "sess-other-ralplan",
+      });
+
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: sessionId,
         },
         { cwd },
       );
@@ -5650,6 +5951,101 @@ esac
       assert.equal(result.omxEventName, "stop");
       assert.equal(result.outputJson, null);
     } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not block a question-only pane from Ralph state owned by another Codex session", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-ralph-question-pane-"));
+    const previousTmuxPane = process.env.TMUX_PANE;
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      const questionSessionId = "sess-question-pane";
+      const questionNativeSessionId = "codex-question-pane";
+      await mkdir(join(stateDir, "sessions", questionSessionId), { recursive: true });
+      await writeJson(join(stateDir, "session.json"), {
+        session_id: questionSessionId,
+        native_session_id: questionNativeSessionId,
+        cwd,
+      });
+      await writeJson(join(stateDir, "sessions", questionSessionId, "ralph-state.json"), {
+        active: true,
+        mode: "ralph",
+        current_phase: "executing",
+        session_id: questionSessionId,
+        owner_omx_session_id: "sess-ralph-owner",
+        owner_codex_session_id: "codex-ralph-owner",
+        thread_id: "thread-ralph-owner",
+        tmux_pane_id: "%41",
+      });
+
+      process.env.TMUX_PANE = "%99";
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: questionNativeSessionId,
+          thread_id: "thread-question-pane",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.equal(result.outputJson, null);
+    } finally {
+      if (typeof previousTmuxPane === "string") process.env.TMUX_PANE = previousTmuxPane;
+      else delete process.env.TMUX_PANE;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks same-session Ralph Stop continuation when ownership identifiers match", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-native-hook-stop-ralph-owned-session-"));
+    const previousTmuxPane = process.env.TMUX_PANE;
+    try {
+      const stateDir = join(cwd, ".omx", "state");
+      const omxSessionId = "sess-ralph-owned";
+      const nativeSessionId = "codex-ralph-owned";
+      await mkdir(join(stateDir, "sessions", omxSessionId), { recursive: true });
+      await writeJson(join(stateDir, "session.json"), {
+        session_id: omxSessionId,
+        native_session_id: nativeSessionId,
+        cwd,
+      });
+      await writeJson(join(stateDir, "sessions", omxSessionId, "ralph-state.json"), {
+        active: true,
+        mode: "ralph",
+        current_phase: "executing",
+        session_id: omxSessionId,
+        owner_omx_session_id: omxSessionId,
+        owner_codex_session_id: nativeSessionId,
+        thread_id: "thread-ralph-owned",
+        tmux_pane_id: "%42",
+      });
+
+      process.env.TMUX_PANE = "%42";
+      const result = await dispatchCodexNativeHook(
+        {
+          hook_event_name: "Stop",
+          cwd,
+          session_id: nativeSessionId,
+          thread_id: "thread-ralph-owned",
+        },
+        { cwd },
+      );
+
+      assert.equal(result.omxEventName, "stop");
+      assert.deepEqual(result.outputJson, {
+        decision: "block",
+        reason:
+          "OMX Ralph is still active (phase: executing; state: .omx/state/sessions/sess-ralph-owned/ralph-state.json); continue the task and gather fresh verification evidence before stopping.",
+        stopReason: "ralph_executing",
+        systemMessage:
+          "OMX Ralph is still active (phase: executing; state: .omx/state/sessions/sess-ralph-owned/ralph-state.json); continue the task and gather fresh verification evidence before stopping.",
+      });
+    } finally {
+      if (typeof previousTmuxPane === "string") process.env.TMUX_PANE = previousTmuxPane;
+      else delete process.env.TMUX_PANE;
       await rm(cwd, { recursive: true, force: true });
     }
   });

@@ -107,9 +107,10 @@ export interface NativeHookDispatchResult {
   outputJson: Record<string, unknown> | null;
 }
 
-const TERMINAL_MODE_PHASES = new Set(["complete", "failed", "cancelled"]);
+const TERMINAL_MODE_PHASES = new Set(["complete", "completed", "failed", "cancelled"]);
 const SKILL_STOP_BLOCKERS = new Set(["ralplan"]);
 const TEAM_TERMINAL_TASK_STATUSES = new Set(["completed", "failed"]);
+const TEAM_WORKER_STOP_ACTIVE_STATES = new Set(["working", "blocked"]);
 const NATIVE_STOP_STATE_FILE = "native-stop-state.json";
 const STABLE_FINAL_RECOMMENDATION_PATTERNS = [
   /^\s*(?:launch|release|ship)-?ready\s*:\s*(?:yes|no)\b[^\n\r]*/im,
@@ -444,8 +445,57 @@ interface ActiveRalphStopState {
   path: string;
 }
 
+interface RalphStopOwnershipContext {
+  sessionId: string;
+  payloadSessionId: string;
+  threadId: string;
+  currentNativeSessionId: string;
+  tmuxPaneId: string;
+}
+
 function isRalphStartingPhase(state: Record<string, unknown>): boolean {
   return safeString(state.current_phase ?? state.currentPhase).trim().toLowerCase() === "starting";
+}
+
+function hasValue(values: string[], value: string): boolean {
+  return value !== "" && values.some((candidate) => candidate === value);
+}
+
+function activeRalphStateMatchesStopOwner(
+  state: Record<string, unknown>,
+  context: RalphStopOwnershipContext,
+): boolean {
+  const ownerOmxSessionId = safeString(state.owner_omx_session_id).trim();
+  if (ownerOmxSessionId && ownerOmxSessionId !== context.sessionId) {
+    return false;
+  }
+
+  const stateSessionId = safeString(state.session_id).trim();
+  if (!ownerOmxSessionId && stateSessionId && stateSessionId !== context.sessionId) {
+    return false;
+  }
+
+  const codexOwnerSessionId = safeString(state.owner_codex_session_id).trim();
+  if (codexOwnerSessionId) {
+    const stopCodexSessionIds = [
+      context.payloadSessionId,
+      context.currentNativeSessionId,
+      context.sessionId,
+    ].filter(Boolean);
+    if (!hasValue(stopCodexSessionIds, codexOwnerSessionId)) return false;
+  }
+
+  const stateThreadId = safeString(state.owner_codex_thread_id ?? state.thread_id).trim();
+  if (stateThreadId && context.threadId && stateThreadId !== context.threadId) {
+    return false;
+  }
+
+  const statePaneId = safeString(state.tmux_pane_id).trim();
+  if (statePaneId && context.tmuxPaneId && statePaneId !== context.tmuxPaneId) {
+    return false;
+  }
+
+  return true;
 }
 
 function shouldHonorCanonicalTerminalRunState(
@@ -481,6 +531,11 @@ async function isVisibleRalphActiveForSession(cwd: string, sessionId: string): P
 async function readActiveRalphState(
   stateDir: string,
   preferredSessionId?: string,
+  ownerContext?: {
+    payloadSessionId?: string;
+    threadId?: string;
+    tmuxPaneId?: string;
+  },
 ): Promise<ActiveRalphStopState | null> {
   const cwd = resolve(stateDir, "..", "..");
   const [rawSessionInfo, usableSessionInfo] = await Promise.all([
@@ -488,6 +543,7 @@ async function readActiveRalphState(
     readUsableSessionState(cwd),
   ]);
   const currentOmxSessionId = safeString(usableSessionInfo?.session_id).trim();
+  const currentNativeSessionId = safeString(usableSessionInfo?.native_session_id).trim();
   const staleCurrentSessionId = rawSessionInfo && !isSessionStateUsable(rawSessionInfo, cwd)
     ? safeString(rawSessionInfo.session_id).trim()
     : "";
@@ -515,7 +571,17 @@ async function readActiveRalphState(
     ) {
       continue;
     }
-    if (sessionScoped?.active === true && shouldContinueRun(sessionScoped)) {
+    if (
+      sessionScoped?.active === true
+      && shouldContinueRun(sessionScoped)
+      && activeRalphStateMatchesStopOwner(sessionScoped, {
+        sessionId,
+        payloadSessionId: safeString(ownerContext?.payloadSessionId).trim(),
+        threadId: safeString(ownerContext?.threadId).trim(),
+        currentNativeSessionId,
+        tmuxPaneId: safeString(ownerContext?.tmuxPaneId).trim(),
+      })
+    ) {
       return { state: sessionScoped, path: sessionScopedPath };
     }
   }
@@ -1131,7 +1197,7 @@ async function resolveTeamStateDirForWorkerContext(
 async function buildTeamWorkerStopOutput(
   cwd: string,
 ): Promise<Record<string, unknown> | null> {
-  const workerContext = parseTeamWorkerEnv(safeString(process.env.OMX_TEAM_WORKER));
+  const workerContext = parseTeamWorkerEnv(safeString(process.env.OMX_TEAM_INTERNAL_WORKER || process.env.OMX_TEAM_WORKER));
   if (!workerContext) return null;
 
   const stateDir = await resolveTeamStateDirForWorkerContext(cwd, workerContext);
@@ -1141,6 +1207,9 @@ async function buildTeamWorkerStopOutput(
     readJsonIfExists(join(workerRoot, "identity.json")),
     readJsonIfExists(join(workerRoot, "status.json")),
   ]);
+
+  const workerState = safeString(status?.state).trim().toLowerCase();
+  if (!TEAM_WORKER_STOP_ACTIVE_STATES.has(workerState)) return null;
 
   const candidateTaskIds = new Set<string>();
   const currentTaskId = safeString(status?.current_task_id).trim();
@@ -1171,7 +1240,7 @@ async function buildTeamWorkerStopOutput(
 }
 
 function hasTeamWorkerContext(): boolean {
-  return parseTeamWorkerEnv(safeString(process.env.OMX_TEAM_WORKER)) !== null;
+  return parseTeamWorkerEnv(safeString(process.env.OMX_TEAM_INTERNAL_WORKER || process.env.OMX_TEAM_WORKER)) !== null;
 }
 
 function isStopExempt(payload: CodexHookPayload): boolean {
@@ -1366,6 +1435,36 @@ function matchesSkillStopContext(
   return true;
 }
 
+function modeStateMatchesSkillStopContext(
+  state: Record<string, unknown>,
+  cwd: string,
+  sessionId: string,
+): boolean {
+  const stateSessionId = safeString(
+    state.owner_omx_session_id
+      ?? state.session_id
+      ?? state.codex_session_id
+      ?? state.owner_codex_session_id,
+  ).trim();
+  if (sessionId && stateSessionId && stateSessionId !== sessionId) return false;
+
+  const stateCwd = safeString(
+    state.cwd
+      ?? state.workingDirectory
+      ?? state.working_directory
+      ?? state.project_path,
+  ).trim();
+  if (stateCwd) {
+    try {
+      if (resolve(stateCwd) !== resolve(cwd)) return false;
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 async function readBlockingSkillForStop(
   cwd: string,
   sessionId: string,
@@ -1379,8 +1478,15 @@ async function readBlockingSkillForStop(
     : [...SKILL_STOP_BLOCKERS];
 
   for (const skill of candidateSkills) {
+    const terminalRunState = await readCanonicalTerminalRunStateForStop(cwd, sessionId, skill);
+    if (terminalRunState) continue;
+
     const modeState = await readStopSessionPinnedState(`${skill}-state.json`, cwd, sessionId);
     if (!modeState || modeState.active !== true) continue;
+    if (!modeStateMatchesSkillStopContext(modeState, cwd, sessionId)) continue;
+
+    const modeSnapshot = getRunContinuationSnapshot(modeState);
+    if (modeSnapshot?.terminal === true) continue;
 
     const phase = formatPhase(
       modeState.current_phase,
@@ -1865,7 +1971,11 @@ async function buildStopHookOutput(
   const threadId = readPayloadThreadId(payload);
   const execFollowupOutput = await buildExecFollowupStopOutput(cwd, canonicalSessionId);
   if (execFollowupOutput) return execFollowupOutput;
-  const ralphState = await readActiveRalphState(stateDir, canonicalSessionId);
+  const ralphState = await readActiveRalphState(stateDir, canonicalSessionId, {
+    payloadSessionId: sessionId,
+    threadId,
+    tmuxPaneId: safeString(process.env.TMUX_PANE).trim(),
+  });
   if (!ralphState) {
     const autoresearchState = await readActiveAutoresearchState(cwd, canonicalSessionId);
     if (autoresearchState) {

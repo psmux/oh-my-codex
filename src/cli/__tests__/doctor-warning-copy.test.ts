@@ -390,7 +390,7 @@ enabled = true
 			await writeFile(
 				join(codexDir, "config.toml"),
 				`
-[env]
+[shell_environment_policy.set]
 USE_OMX_EXPLORE_CMD = "off"
 `.trimStart(),
 			);
@@ -403,7 +403,7 @@ USE_OMX_EXPLORE_CMD = "off"
 			assert.equal(res.status, 0, res.stderr || res.stdout);
 			assert.match(
 				res.stdout,
-				/Explore routing: disabled in config\.toml \[env\]; set USE_OMX_EXPLORE_CMD = "1" to restore default explore-first routing/,
+				/Explore routing: disabled in config\.toml; set USE_OMX_EXPLORE_CMD = "1" under \[shell_environment_policy\.set\] to restore default explore-first routing/,
 			);
 		} finally {
 			await rm(wd, { recursive: true, force: true });

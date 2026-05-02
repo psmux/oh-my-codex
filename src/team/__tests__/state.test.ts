@@ -2039,6 +2039,21 @@ exit 1
     }
   });
 
+
+  it('cleanupTeamState rejects unsafe team names before path construction', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-state-unsafe-'));
+    try {
+      const victim = join(cwd, '.omx', 'state', 'victim');
+      await mkdir(victim, { recursive: true });
+      await writeFile(join(victim, 'keep.txt'), 'keep');
+
+      await assert.rejects(() => cleanupTeamState('../victim', cwd), /invalid_team_name/);
+      assert.equal(existsSync(join(victim, 'keep.txt')), true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('validateTeamName rejects invalid names (via initTeamState throwing)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-state-'));
     try {

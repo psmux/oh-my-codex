@@ -12,6 +12,8 @@ import {
   filterRalphCodexArgs,
   isRalphPrdMode,
   normalizeRalphCliArgs,
+  readMatchedApprovedRalphExecutionHint,
+  resolveApprovedRalphExecutionHint,
 } from '../ralph.js';
 import type { ApprovedExecutionLaunchHint } from '../../planning/artifacts.js';
 
@@ -30,6 +32,68 @@ describe('extractRalphTaskDescription', () => {
   });
   it('supports -- separator', () => {
     assert.equal(extractRalphTaskDescription(['--model', 'gpt-5', '--', 'fix', '--weird-name']), 'fix --weird-name');
+  });
+});
+
+describe('resolveApprovedRalphExecutionHint', () => {
+  it('reuses the approved hint for follow-up launches without explicit task text', () => {
+    assert.equal(resolveApprovedRalphExecutionHint(approvedHint, 'ralph-cli-launch'), approvedHint);
+  });
+
+  it('reuses the approved hint when the explicit task matches the approved handoff', () => {
+    assert.equal(resolveApprovedRalphExecutionHint(approvedHint, 'Execute approved issue 1072 plan'), approvedHint);
+  });
+
+  it('drops the approved hint for unrelated explicit Ralph tasks', () => {
+    assert.equal(resolveApprovedRalphExecutionHint(approvedHint, 'Refactor unrelated queue handling'), null);
+  });
+});
+
+describe('readMatchedApprovedRalphExecutionHint', () => {
+  it('selects the matching approved Ralph hint when a PRD lists multiple launch hints', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-ralph-approved-context-'));
+    try {
+      await mkdir(join(cwd, '.omx', 'plans'), { recursive: true });
+      await writeFile(
+        join(cwd, '.omx', 'plans', 'prd-issue-909.md'),
+        [
+          '# PRD',
+          '',
+          'Launch via omx ralph "Execute alpha"',
+          'Launch via omx ralph "Execute beta"',
+        ].join('\n'),
+      );
+      await writeFile(join(cwd, '.omx', 'plans', 'test-spec-issue-909.md'), '# Test Spec\n');
+
+      const hint = readMatchedApprovedRalphExecutionHint(cwd, 'Execute alpha');
+      assert.ok(hint);
+      assert.equal(hint?.task, 'Execute alpha');
+      assert.equal(hint?.command, 'omx ralph "Execute alpha"');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed for bare Ralph follow-up reuse when a PRD lists multiple Ralph launch hints', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-ralph-approved-context-'));
+    try {
+      await mkdir(join(cwd, '.omx', 'plans'), { recursive: true });
+      await writeFile(
+        join(cwd, '.omx', 'plans', 'prd-issue-909-bare.md'),
+        [
+          '# PRD',
+          '',
+          'Launch via omx ralph "Execute alpha"',
+          'Launch via omx ralph "Execute beta"',
+        ].join('\n'),
+      );
+      await writeFile(join(cwd, '.omx', 'plans', 'test-spec-issue-909-bare.md'), '# Test Spec\n');
+
+      const hint = readMatchedApprovedRalphExecutionHint(cwd, 'ralph-cli-launch');
+      assert.equal(hint, null);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });
 
@@ -86,6 +150,11 @@ const approvedHint: ApprovedExecutionLaunchHint = {
   sourcePath: '.omx/plans/prd-issue-1072.md',
   testSpecPaths: ['.omx/plans/test-spec-issue-1072.md'],
   deepInterviewSpecPaths: ['.omx/specs/deep-interview-issue-1072.md'],
+  repositoryContextSummary: {
+    sourcePath: '.omx/plans/repo-context-issue-1072.md',
+    content: 'Key files: src/cli/ralph.ts and src/planning/artifacts.ts',
+    truncated: false,
+  },
 };
 
 describe('assertRequiredRalphPrdJson', () => {
@@ -225,6 +294,8 @@ describe('ralph deslop launch wiring', () => {
     assert.match(instructions, /test specs: \.omx\/plans\/test-spec-issue-1072\.md/i);
     assert.match(instructions, /deep-interview specs: \.omx\/specs\/deep-interview-issue-1072\.md/i);
     assert.match(instructions, /Carry forward the approved deep-interview requirements/i);
+    assert.match(instructions, /approved repository context summary: \.omx\/plans\/repo-context-issue-1072\.md/i);
+    assert.match(instructions, /Key files: src\/cli\/ralph\.ts and src\/planning\/artifacts\.ts/i);
   });
 
   it('seeds the changed-files artifact with bounded-scope guidance', () => {

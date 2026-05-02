@@ -26,7 +26,10 @@ import {
 	EXPLORE_BIN_ENV,
 } from "./explore.js";
 import { getPackageRoot } from "../utils/package.js";
-import { hasLegacyOmxTeamRunTable } from "../config/generator.js";
+import {
+	hasLegacyOmxTeamRunTable,
+	getModelContextRecommendation,
+} from "../config/generator.js";
 import { getMissingManagedCodexHookEvents } from "../config/codex-hooks.js";
 import { OMX_FIRST_PARTY_MCP_SERVER_NAMES } from "../config/omx-first-party-mcp.js";
 import { getDefaultBridge, isBridgeEnabled } from "../runtime/bridge.js";
@@ -154,6 +157,12 @@ export async function doctor(options: DoctorOptions = {}): Promise<void> {
 
 	// Check 4: Config file
 	checks.push(await checkConfig(paths.configPath));
+
+	// Check 4.1: Model context recommendation
+	const contextRecommendationCheck = await checkModelContextRecommendation(
+		paths.configPath,
+	);
+	if (contextRecommendationCheck) checks.push(contextRecommendationCheck);
 
 	// Check 4.25: Native hooks coverage
 	checks.push(await checkNativeHooks(paths.hooksPath, paths.configPath));
@@ -779,6 +788,65 @@ async function checkConfig(configPath: string): Promise<Check> {
 	}
 }
 
+function formatContextRecommendationWarning(
+	configuredValues: string[],
+	recommendedContextWindow: number,
+	recommendedAutoCompactLimit: number,
+): string {
+	return `${configuredValues.join(
+		", ",
+	)} exceeds the OMX setup recommendation for gpt-5.5 (${recommendedContextWindow} / ${recommendedAutoCompactLimit}); doctor does not rewrite user config, so lower these values or verify your active Codex runtime/provider behavior if this customization is intentional`;
+}
+
+async function checkModelContextRecommendation(
+	configPath: string,
+): Promise<Check | null> {
+	if (!existsSync(configPath)) return null;
+
+	try {
+		const content = await readFile(configPath, "utf-8");
+		const parsed = parseToml(content) as Record<string, unknown>;
+		const model = parsed.model;
+		if (typeof model !== "string") return null;
+
+		const recommendation = getModelContextRecommendation(model);
+		if (!recommendation) return null;
+
+		const configuredValues: string[] = [];
+		const contextWindow = parsed.model_context_window;
+		if (
+			typeof contextWindow === "number" &&
+			contextWindow > recommendation.modelContextWindow
+		) {
+			configuredValues.push(`model_context_window=${contextWindow}`);
+		}
+
+		const autoCompactLimit = parsed.model_auto_compact_token_limit;
+		if (
+			typeof autoCompactLimit === "number" &&
+			autoCompactLimit > recommendation.modelAutoCompactTokenLimit
+		) {
+			configuredValues.push(
+				`model_auto_compact_token_limit=${autoCompactLimit}`,
+			);
+		}
+
+		if (configuredValues.length === 0) return null;
+
+		return {
+			name: "Model context recommendation",
+			status: "warn",
+			message: formatContextRecommendationWarning(
+				configuredValues,
+				recommendation.modelContextWindow,
+				recommendation.modelAutoCompactTokenLimit,
+			),
+		};
+	} catch {
+		return null;
+	}
+}
+
 async function checkExploreRouting(configPath: string): Promise<Check> {
 	const envValue = process.env[OMX_EXPLORE_CMD_ENV];
 	if (
@@ -803,8 +871,13 @@ async function checkExploreRouting(configPath: string): Promise<Check> {
 
 	try {
 		const content = await readFile(configPath, "utf-8");
-		const parsed = parseToml(content) as { env?: Record<string, unknown> };
-		const configuredValue = parsed?.env?.USE_OMX_EXPLORE_CMD;
+		const parsed = parseToml(content) as {
+			env?: Record<string, unknown>;
+			shell_environment_policy?: { set?: Record<string, unknown> };
+		};
+		const configuredValue =
+			parsed?.shell_environment_policy?.set?.USE_OMX_EXPLORE_CMD ??
+			parsed?.env?.USE_OMX_EXPLORE_CMD;
 
 		if (
 			typeof configuredValue === "string" &&
@@ -816,7 +889,7 @@ async function checkExploreRouting(configPath: string): Promise<Check> {
 				name: "Explore routing",
 				status: "warn",
 				message:
-					'disabled in config.toml [env]; set USE_OMX_EXPLORE_CMD = "1" to restore default explore-first routing',
+					'disabled in config.toml; set USE_OMX_EXPLORE_CMD = "1" under [shell_environment_policy.set] to restore default explore-first routing',
 			};
 		}
 
